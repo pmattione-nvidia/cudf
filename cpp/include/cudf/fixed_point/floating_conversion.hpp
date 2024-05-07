@@ -376,109 +376,6 @@ CUDF_HOST_DEVICE inline constexpr T divide_power10(T value, int exp10)
   }
 }
 
-CUDF_HOST_DEVICE inline uint64_t decimal_shift_right(__uint128_t num)
-{
-  // Modified from libdivide_128_div_64_to_64() in libdivide, because here
-  // we know the denominator at compile time (10^18). 
-  // From https://github.com/ridiculousfish/libdivide/blob/master/libdivide.h
-  // Used under the zlib license:
-
-  // zlib License
-  // ------------
-
-  // Copyright (C) 2010 - 2019 ridiculous_fish, <libdivide@ridiculousfish.com>
-  // Copyright (C) 2016 - 2019 Kim Walisch, <kim.walisch@gmail.com>
-
-  // This software is provided 'as-is', without any express or implied
-  // warranty.  In no event will the authors be held liable for any damages
-  // arising from the use of this software.
-
-  // Permission is granted to anyone to use this software for any purpose,
-  // including commercial applications, and to alter it and redistribute it
-  // freely, subject to the following restrictions:
-
-  // 1. The origin of this software must not be misrepresented; you must not
-  //    claim that you wrote the original software. If you use this software
-  //    in a product, an acknowledgment in the product documentation would be
-  //    appreciated but is not required.
-  // 2. Altered source versions must be plainly marked as such, and must not be
-  //    misrepresented as being the original software.
-  // 3. This notice may not be removed or altered from any source distribution.
-
-  uint64_t numhi = num >> 64;
-  uint64_t numlo = static_cast<uint64_t>(num);
-
-  // We work in base 2**32.
-  // A uint32 holds a single digit. A uint64 holds two digits.
-  // Our numerator is conceptually [num3, num2, num1, num0].
-  // Our denominator is [den1, den0].
-
-  // The high and low digits of our computed quotient.
-  uint32_t q1;
-  uint32_t q0;
-
-  // The normalization shift factor.
-  constexpr int shift = 4; //10^18 in binary has 4 leading zeroes
-
-  // The high and low digits of our numerator (after normalizing).
-  uint32_t num1;
-  uint32_t num0;
-
-  // A partial remainder.
-  uint64_t rem;
-
-  // The estimated quotient, and its corresponding remainder (unrelated to true remainder).
-  uint64_t qhat;
-  uint64_t rhat;
-
-  // Variables used to correct the estimated quotient.
-  uint64_t c1;
-  uint64_t c2;
-
-  // Determine the normalization factor. We multiply den by this, so that its leading digit is at
-  // least half b. In binary this means just shifting left by the number of leading zeros, so that
-  // there's a 1 in the MSB.
-  // We also shift numer by the same amount. This cannot overflow because numhi < den.
-  // The expression (-shift & 63) is the same as (64 - shift), except it avoids the UB of shifting
-  // by 64. The funny bitwise 'and' ensures that numlo does not get shifted into numhi if shift is
-  // 0. clang 11 has an x86 codegen bug here: see LLVM bug 50118. The sequence below avoids it.
-  static constexpr uint64_t original_den = 1000000000000000000ULL; //10^18
-  static constexpr uint64_t den = original_den << shift;
-  numhi <<= shift;
-  numhi |= (numlo >> 60);
-  numlo <<= shift;
-
-  // Extract the low digits of the numerator and both digits of the denominator.
-  num1 = (uint32_t)(numlo >> 32);
-  num0 = (uint32_t)(numlo & 0xFFFFFFFFu);
-  static constexpr auto den1 = (uint32_t)(den >> 32);
-  static constexpr auto den0 = (uint32_t)(den & 0xFFFFFFFFu);
-
-  // We wish to compute q1 = [n3 n2 n1] / [d1 d0].
-  // Estimate q1 as [n3 n2] / [d1], and then correct it.
-  // Note while qhat may be 2 digits, q1 is always 1 digit.
-  qhat = numhi / den1;
-  rhat = numhi % den1;
-  c1 = qhat * den0;
-  c2 = (rhat << 32) + num1;
-  if (c1 > c2) qhat -= (c1 - c2 > den) ? 2 : 1;
-  q1 = (uint32_t)qhat;
-
-  // Compute the true (partial) remainder.
-  rem = (numhi << 32) + num1 - q1 * den;
-
-  // We wish to compute q0 = [rem1 rem0 n0] / [d1 d0].
-  // Estimate q0 as [rem1 rem0] / [d1] and correct it.
-  qhat = rem / den1;
-  rhat = rem % den1;
-  c1 = qhat * den0;
-  c2 = (rhat << 32) + num0;
-  if (c1 > c2) qhat -= (c1 - c2 > den) ? 2 : 1;
-  q0 = (uint32_t)qhat;
-
-  return ((uint64_t)q1 << 32) | q0;
-}
-
 /**
  * @brief Helper struct for getting and setting the components of a floating-point value
  *
@@ -886,9 +783,9 @@ CUDF_HOST_DEVICE inline auto shift_to_decimal_posexp10(
     // 2^61 / 10^9 (~2^30) is ~2^31, and 2^121 / 10^18 (~2^60) is ~2^61
     // Thus we can use a faster division routine that takes this account. 
     // I don't know of one for 64 by 32, but we can optimize for 128 by 64. 
-    if constexpr (Constants::is_double)
-      shifting_rep = decimal_shift_right(shifting_rep);
-    else
+//    if constexpr (Constants::is_double)
+//      shifting_rep = decimal_shift_right(shifting_rep);
+//    else
       shifting_rep /= Constants::max_digits_shift_pow;
     exp10 -= Constants::max_digits_shift;
 
@@ -1191,9 +1088,9 @@ CUDF_HOST_DEVICE inline auto shift_to_binary_negexp10(DecimalRep decimal_rep, in
     // More decimal places to shift than we have room: Divide the max number of 10s
     // Note that the result of this division is guaranteed to fit within low 64/32 bits
     // See discussion in shift_to_decimal_posexp10() for more details
-    if constexpr (Constants::is_double)
-      shifting_rep = decimal_shift_right(shifting_rep);
-    else
+//    if constexpr (Constants::is_double)
+//      shifting_rep = decimal_shift_right(shifting_rep);
+//    else
       shifting_rep /= Constants::max_digits_shift_pow;
     exp10_mag -= Constants::max_digits_shift;
 
