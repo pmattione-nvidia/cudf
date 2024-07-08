@@ -108,7 +108,7 @@ struct floating_converter {
   // The value of the mantissa is in the range [1, 2).
   /// # significand bits (includes understood bit)
   static constexpr int num_significand_bits = cuda::std::numeric_limits<FloatingType>::digits;
-  /// # mantissa bits (-1 for understood bit)
+  /// # stored mantissa bits (-1 for understood bit)
   static constexpr int num_stored_mantissa_bits = num_significand_bits - 1;
   /// The mask for the understood bit
   static constexpr IntegralType understood_bit_mask = (IntegralType(1) << num_stored_mantissa_bits);
@@ -231,6 +231,26 @@ struct floating_converter {
     int const pow2 = floating_pow2 - num_stored_mantissa_bits;
 
     return {significand, pow2};
+  }
+
+  /**
+   * @brief Extracts the exponent of a bit-casted floating-point number.
+   * shifted for denormals.
+   *
+   * @note Denormals, zeros, inf, NaN not handled.
+   *
+   * @param integer_rep The bit-casted floating value to extract the exponent from
+   * @return The stored base-2 exponent
+   */
+  CUDF_HOST_DEVICE inline static int get_last_bit_pow2(IntegralType integer_rep)
+  {
+    // Get the exponent: extract the bits, shift them down, and subtract the bias.
+    auto const exponent_bits         = integer_rep & exponent_mask;
+    auto const shifted_exponent_bits = exponent_bits >> num_stored_mantissa_bits;
+    int floating_pow2                = static_cast<int>(shifted_exponent_bits) - exponent_bias;
+
+    // The power-of-2 of the last bit is 23/52 less than the stored pow2
+    return floating_pow2 - num_stored_mantissa_bits;
   }
 
   /**
@@ -426,7 +446,8 @@ CUDF_HOST_DEVICE inline T divide_power10_64bit(T value, int pow10)
  * @param pow10 The power-of-10 of the denominator, from 0 to 38 inclusive.
  * @return Returns value / 10^pow10.
  */
-template <typename T, CUDF_ENABLE_IF(cuda::std::is_unsigned_v<T>)>
+template <typename T,
+          CUDF_ENABLE_IF(cuda::std::is_unsigned_v<T> || cuda::std::is_floating_point_v<T>)>
 CUDF_HOST_DEVICE inline constexpr T divide_power10_128bit(T value, int pow10)
 {
   // See comments in divide_power10_32bit() for an introduction.
@@ -546,7 +567,8 @@ CUDF_HOST_DEVICE inline constexpr T multiply_power10_64bit(T value, int pow10)
  * @param pow10 The power-of-10 of the multiplier, from 0 to 38 inclusive.
  * @return Returns value * 10^pow10.
  */
-template <typename T, CUDF_ENABLE_IF(cuda::std::is_unsigned_v<T>)>
+template <typename T,
+          CUDF_ENABLE_IF(cuda::std::is_unsigned_v<T> || cuda::std::is_floating_point_v<T>)>
 CUDF_HOST_DEVICE inline constexpr T multiply_power10_128bit(T value, int pow10)
 {
   // See comments in divide_power10_128bit() for discussion.
@@ -900,7 +922,7 @@ shift_to_decimal_pospow(typename shifting_constants<FloatingType>::IntegerRep co
  * @param base2_value The base-2 fixed-point value we are converting from
  * @param pow2 The number of powers of 2 to apply to convert from base-2
  * @param pow10 The number of powers of 10 to apply to reach the desired scale factor
- * @param truncating Whether the scale factor truncates floating-point information
+ * @param round_final_bit_shift Whether to round the final bit-shift right
  * @return Magnitude of the converted-to decimal integer
  */
 template <typename Rep,
@@ -910,7 +932,7 @@ CUDF_HOST_DEVICE inline typename shifting_constants<FloatingType>::ShiftingRep
 shift_to_decimal_negpow(typename shifting_constants<FloatingType>::IntegerRep base2_value,
                         int pow2,
                         int pow10,
-                        bool truncating)
+                        bool round_final_bit_shift)
 {
   // This is similar to shift_to_decimal_pospow(), except pow10 < 0 & pow2 < 0
   // See comments in that function for details.
@@ -937,9 +959,9 @@ shift_to_decimal_negpow(typename shifting_constants<FloatingType>::IntegerRep ba
 
     // Final bit shifting: Shift may be large, guard against UB
     // If we aren't truncating information from the original floating-point number,
-    // then always round up (to match pandas) by adding 1 to the last bit
+    // then always round away from zero (to match pyarrow) by adding 1/2 (1 to last-shifted bit)
     shifting_rep = guarded_right_shift(shifting_rep, pow2_mag - 1);
-    shifting_rep += static_cast<ShiftingRep>(!truncating);
+    shifting_rep += static_cast<ShiftingRep>(round_final_bit_shift);
     return (shifting_rep >> 1);
   };
 
@@ -991,6 +1013,186 @@ shift_to_decimal_negpow(typename shifting_constants<FloatingType>::IntegerRep ba
  *
  * @tparam Rep The type of integer we are converting to, to store the decimal value
  * @tparam FloatingType The type of floating-point object we are converting from
+ * @param base2_value The base-2 fixed-point value we are converting from
+ * @param pow2 The number of powers of 2 to apply to convert from base-2
+ * @param pow10 The number of powers of 10 to apply to reach the desired scale factor
+ * @param round_final_bit_shift Whether to round the final bit-shift right
+ * @return Integer representation of the floating-point value, given the desired scale
+ */
+template <typename Rep,
+          typename FloatingType,
+          CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatingType>)>
+CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> convert_floating_to_integral_core(
+  typename floating_converter<FloatingType>::IntegralType base2_value,
+  int const pow10,
+  int const pow2,
+  bool const round_final_bit_shift)
+{
+  // Apply the powers of 2 and 10 to convert to decimal.
+  // The result will be base2_value * (2^pow2) / (10^pow10)
+
+  // Note that while this code is branchy, the decimal scale factor is part of the
+  // column type itself, so every thread will take the same branches on pow10.
+  // Also data within a column tends to be similar, so they will often take the
+  // same branches on pow2 as well.
+
+  // NOTE: some returns here can overflow (e.g. ShiftingRep -> UnsignedRep)
+  using UnsignedRep = cuda::std::make_unsigned_t<Rep>;
+  if (pow10 == 0) {
+    // NOTE: Left Bit-shift can overflow! As can cast! (e.g. double -> decimal32)
+    // Bit shifts may be large, guard against UB
+    if (pow2 >= 0) {
+      return guarded_left_shift(static_cast<UnsignedRep>(base2_value), pow2);
+    } else {
+      return static_cast<UnsignedRep>(guarded_right_shift(base2_value, -pow2));
+    }
+  } else if (pow10 > 0) {
+    if (pow2 <= 0) {
+      // Power-2/10 shifts both downward: order doesn't matter, apply and bail.
+      // Guard against shift being undefined behavior
+      auto const shifted = guarded_right_shift(base2_value, -pow2);
+      return static_cast<UnsignedRep>(divide_power10<decltype(shifted)>(shifted, pow10));
+    }
+    return static_cast<UnsignedRep>(
+      shift_to_decimal_pospow<FloatingType>(base2_value, pow2, pow10));
+  } else {  // pow10 < 0
+    if (pow2 >= 0) {
+      // Power-2/10 shifts both upward: order doesn't matter, apply and bail.
+      // NOTE: Either shift, multiply, or cast (e.g. double -> decimal32) can overflow!
+      auto const shifted = guarded_left_shift(static_cast<UnsignedRep>(base2_value), pow2);
+      return static_cast<UnsignedRep>(multiply_power10<UnsignedRep>(shifted, -pow10));
+    }
+    return static_cast<UnsignedRep>(
+      shift_to_decimal_negpow<Rep, FloatingType>(base2_value, pow2, pow10, round_final_bit_shift));
+  }
+}
+
+/**
+ * @brief Perform floating-point -> integer decimal conversion, matching Spark
+ *
+ * @tparam Rep The type of integer we are converting to, to store the decimal value
+ * @tparam FloatingType The type of floating-point object we are converting from
+ * @param floating The floating point value to convert
+ * @param scale The desired base-10 scale factor: decimal value = returned value * 10^scale
+ * @return Integer representation of the floating-point value, given the desired scale
+ */
+template <typename Rep,
+          typename FloatingType,
+          CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatingType>)>
+CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingType floating,
+                                                                      scale_type const& scale)
+{
+  // Get input integer rep and sign
+  using converter        = floating_converter<FloatingType>;
+  auto integer_rep_input = converter::bit_cast_to_integer(floating);
+  auto const is_negative = converter::get_is_negative(integer_rep_input);
+
+  // Get input powers of 2 and 10
+  auto const pow2_last_bit = converter::get_last_bit_pow2(integer_rep_input);
+  auto const pow10         = static_cast<int>(scale);
+
+  // Massage input:
+  // Spark wants to round away the last decimal digit away from zero.
+  // To do that, we need to add +/- 0.5*10^scale to the input, before the lower digits are lost.
+
+  // Spark also wants to add 1/2 a floating-point bit to counter rounding down by the compiler.
+  // This is similar to add_half_if_truncates() (see for discussion), except Spark almost always to
+  // do it. How do you add half a bit? Just bit-shift left and add 1 (updating pow2!!)
+
+  // Most of the time we need to do both to handle both effects, but not always.
+  // Suppose a user enters 3527.61953125 with scale -7.
+  // This number is stored in double as 3527.61953124999..., and Spark wants 35276195313.
+  // We need to add 1/2 bit to get 3527.61953125000..., and 0.5*10^scale to round up to 35276195313
+  // Both are needed, and excluded either will yield 35276195312 instead.
+
+  // But, if the 1/2 a floating-point bit term is larger than the rounding term, don't add the
+  // rounding. Why? Because those digits will get floored anyway when we clean up the output (see
+  // comments at end). Which is larger? Rounding term: 1/2 * 10^pow10, Half-bit: 1/2 *
+  // 2^pow2_last_bit Suppose 10^X = 2^Y: take log10 of both sides: X = Y * log10(2), log10(2.0) =
+  // 0.301029... Float math is slow and inputs are ints, so use ~90/299 (0.3010033...) Approximation
+  // isn't exact, but if terms are nearly equal we won't add the rounding anyway (see below)
+
+  // Compare rounding terms
+  int const pow10_term        = 299 * pow10;
+  int const rounding_pow_diff = pow10_term - 90 * pow2_last_bit;
+
+  // Handling the rounding is tricky though when the terms have a similar order of magnitude.
+
+  // Suppose a user enters 97938.20f with scale -2.
+  // That is stored in float as 97938.2031f, and Spark wants 9793820.
+  // It looks like we can add both, but adding 0.005 (for rounding) becomes 97938.2109f
+  // This is because we're at the edge of float's precision, and the nearest value is too large.
+  // So don't try to round up below the last decimal place of the floating-point number:
+  // Adding 1/2 bit will do the same, and is more accurate.
+
+  // Only round up at or above the last decimal place of the floating point number
+  int const rounding_terms_decimal_digit_diff = rounding_pow_diff / 299;
+  if (rounding_terms_decimal_digit_diff > 0) {
+    auto const decimal_rounding_to_add = (pow10 >= 0)
+                                           ? multiply_power10_128bit(FloatingType(0.5), pow10)
+                                           : divide_power10_128bit(FloatingType(0.5), -pow10);
+    floating += (is_negative) ? -decimal_rounding_to_add : decimal_rounding_to_add;
+  }
+
+  // We have our input floating-point number (we'll add half a bit further below). Extract its
+  // components
+  // +/-0 has a special floating-point bit pattern that isn't handled below: early out if zero.
+  if (floating == FloatingType(0)) {
+    // rounded to zero. If here, half-bit add below is below scale and will get floored on output
+    // anyway
+    return 0;
+  }
+  auto const integer_rep                  = converter::bit_cast_to_integer(floating);
+  auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
+
+  // Now, suppose a user enters 6.1219449e-05f with scale -10.
+  // That is stored in float as 6.121944898-05f, and Spark wants 612194.
+  // If we add the 0.5*10^scale it becomes 6.12194999e-5f, and adding 1/2 a bit sends it to 612195
+  // These rounding terms are at different decimal magnitudes, so as it stands both would be
+  // applied. In this case, we could add either one (but not the other) and it would be OK. Which do
+  // we choose?
+
+  // Well, suppose a user enters the similar 6.1218449e-05f with scale -10 (note the 8 instead of
+  // 9!!). This is stored in float as 6.1218452e-5. Spark wants 612185 Here adding 1/2 bit isn't
+  // large enough, but rounding away from zero is. To handle both cases: Don't add 1/2 bit if the
+  // round away from zero adds to the last decimal digit of the FLOATING-POINT number. Note though
+  // that we do need to add it otherwise, to handle (e.g.) 3527.61953125 scale -7 above.
+  bool const add_half_bit = (rounding_terms_decimal_digit_diff != 1);
+
+  // Add half a bit to correct for compiler rounding text to nearest floating-point value
+  // See comments in add_half_if_truncates(), except here we always add it
+  // Even if we don't add, shift bits to line up with what the core algorithm is expecting.
+  auto const base2_value = (significand << 1) + static_cast<decltype(significand)>(add_half_bit);
+  auto const pow2        = floating_pow2 - 1;
+
+  // Main algorithm: Apply the powers of 2 and 10
+  bool const round_final_bit_shift = false;  // Spark doesn't want this behavior
+  auto magnitude                   = convert_floating_to_integral_core<Rep, FloatingType>(
+    base2_value, pow10, pow2, round_final_bit_shift);
+
+  // Spark wants to floor the last digits of the output, clearing leftover data from adding the half
+  // bit. This power of 1/2 was added at bit pow2 (above). How many digits do we need to floor?
+  // floor_pow10 = rounded_pow2_decimal_digit - pow10 pow2_decimal_digit = pow2 * (90/299), using
+  // the same ratio as above. to round, add 1/2 and floor
+  int const rounded_pow2_decimal_digit = (180 * pow2 + 299) / 598;
+  int const floor_pow10                = rounded_pow2_decimal_digit - pow10;
+  if (floor_pow10 >= 0) {
+    // Note, if floor_pow10 is negative, the half-bit info was cutoff by the scale factor
+    auto const truncated = divide_power10<Rep>(magnitude, floor_pow10);
+    magnitude            = multiply_power10<Rep>(truncated, floor_pow10);
+  }
+
+  // Reapply the sign and return
+  // NOTE: Cast can overflow!
+  auto const signed_magnitude = static_cast<Rep>(magnitude);
+  return is_negative ? -signed_magnitude : signed_magnitude;
+}
+
+/**
+ * @brief Perform floating-point -> integer decimal conversion, matching pyarrow
+ *
+ * @tparam Rep The type of integer we are converting to, to store the decimal value
+ * @tparam FloatingType The type of floating-point object we are converting from
  * @param floating The floating point value to convert
  * @param scale The desired base-10 scale factor: decimal value = returned value * 10^scale
  * @return Integer representation of the floating-point value, given the desired scale
@@ -1009,54 +1211,15 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral(FloatingType const& flo
   // Note that the base2_value here is an unsigned integer with sizeof(FloatingType)
   auto const is_negative                  = converter::get_is_negative(integer_rep);
   auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
-  auto const pow10                        = static_cast<int>(scale);
 
   // Add half a bit if truncating to yield expected value, see function for discussion.
-  auto const [base2_value_bound, pow2_bound, truncates_bound] =
+  auto const pow10 = static_cast<int>(scale);
+  auto const [base2_value, pow2, truncates] =
     add_half_if_truncates(significand, floating_pow2, pow10);
 
-  // Structured binding variables cannot be captured :/
-  auto const base2_value = base2_value_bound;
-  auto const pow2        = pow2_bound;
-  auto const truncates   = truncates_bound;
-
-  // Apply the powers of 2 and 10 to convert to decimal.
-  // The result will be base2_value * (2^pow2) / (10^pow10)
-  //
-  // Note that while this code is branchy, the decimal scale factor is part of the
-  // column type itself, so every thread will take the same branches on pow10.
-  // Also data within a column tends to be similar, so they will often take the
-  // same branches on pow2 as well.
-  //
-  // NOTE: some returns here can overflow (e.g. ShiftingRep -> UnsignedRep)
-  using UnsignedRep    = cuda::std::make_unsigned_t<Rep>;
-  auto const magnitude = [&]() -> UnsignedRep {
-    if (pow10 == 0) {
-      // NOTE: Left Bit-shift can overflow! As can cast! (e.g. double -> decimal32)
-      // Bit shifts may be large, guard against UB
-      if (pow2 >= 0) {
-        return guarded_left_shift(static_cast<UnsignedRep>(base2_value), pow2);
-      } else {
-        return guarded_right_shift(base2_value, -pow2);
-      }
-    } else if (pow10 > 0) {
-      if (pow2 <= 0) {
-        // Power-2/10 shifts both downward: order doesn't matter, apply and bail.
-        // Guard against shift being undefined behavior
-        auto const shifted = guarded_right_shift(base2_value, -pow2);
-        return divide_power10<decltype(shifted)>(shifted, pow10);
-      }
-      return shift_to_decimal_pospow<FloatingType>(base2_value, pow2, pow10);
-    } else {  // pow10 < 0
-      if (pow2 >= 0) {
-        // Power-2/10 shifts both upward: order doesn't matter, apply and bail.
-        // NOTE: Either shift, multiply, or cast (e.g. double -> decimal32) can overflow!
-        auto const shifted = guarded_left_shift(static_cast<UnsignedRep>(base2_value), pow2);
-        return multiply_power10<UnsignedRep>(shifted, -pow10);
-      }
-      return shift_to_decimal_negpow<Rep, FloatingType>(base2_value, pow2, pow10, truncates);
-    }
-  }();
+  // Apply the powers of 2 and 10
+  auto const magnitude =
+    convert_floating_to_integral_core<Rep, FloatingType>(base2_value, pow10, pow2, !truncates);
 
   // Reapply the sign and return
   // NOTE: Cast can overflow!
