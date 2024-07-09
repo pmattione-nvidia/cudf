@@ -1036,6 +1036,76 @@ CUDF_HOST_DEVICE inline cuda::std::make_unsigned_t<Rep> convert_floating_to_inte
 }
 
 /**
+ * @brief Perform floating-point -> integer decimal conversion, matching Spark
+ *
+ * @tparam Rep The type of integer we are converting to, to store the decimal value
+ * @tparam FloatingType The type of floating-point object we are converting from
+ * @param floating The floating point value to convert
+ * @param scale The desired base-10 scale factor: decimal value = returned value * 10^scale
+ * @return Integer representation of the floating-point value, given the desired scale
+ */
+template <typename Rep,
+          typename FloatingType,
+          CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatingType>)>
+CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingType floating,
+                                                                      scale_type const& scale)
+{
+  // Spark wants to perform the conversion as double to have the most precision. 
+  // However, the behavior is still slightly different if the original type was float. 
+
+  // Extract components of the floating point number
+  using converter        = floating_converter<double>;
+  auto const integer_rep = converter::bit_cast_to_integer(double(floating));
+  if (converter::is_zero(integer_rep)) { return 0; }
+
+  // Note that the significand here is an unsigned integer with sizeof(double)
+  auto const is_negative                  = converter::get_is_negative(integer_rep);
+  auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
+
+  // Spark wants to round the last decimal place, so we'll perform the conversion
+  // with one lower power of 10 so that we can round at the end. 
+  auto const pow10 = static_cast<int>(scale);
+  auto const shifting_pow10 = pow10 - 1;
+
+  // Four doubles, add half a bit to correct for compiler rounding text to nearest floating-point value. 
+  // See comments in add_half_if_truncates(), except here we always add it ... but only for doubles. 
+  // Even if we don't add (floats), shift bits to line up with what the shifting algorithm is expecting.
+  auto base2_value = (significand << 1);
+  auto const pow2  = floating_pow2 - 1;
+  if constexpr (cuda::std::is_same_v<FloatingType, double>) {
+    ++base2_value;
+  }
+
+  // Main algorithm: Apply the powers of 2 and 10 (except for the last power-of-10)
+  auto magnitude = convert_floating_to_integral_shifting<Rep, double>(base2_value, shifting_pow10, pow2);
+
+  //To round the final decimal place, add 5 to one past the last decimal place
+  magnitude += 5;
+
+  // Spark wants to floor the last digits of the output, clearing data that was beyond the 
+  // precision that was available in double. 
+  // How many digits do we need to floor? 
+  // The (rounded) decimal digit corresponding to pow2 (just past double precision) to the end (pow10). 
+  // The conversion from pow2 to pow10 is log10(2), which is ~90/299
+  int const rounding_term = (pow2 > 0) ? 299 : -299; //round away from zero
+  int const rounded_pow2_decimal_digit = (180 * pow2 + rounding_term) / 598;
+  int const floor_pow10 = rounded_pow2_decimal_digit - pow10;
+  if (floor_pow10 >= 0) {
+    // Note, if floor_pow10 is negative, the scale factor cut off the extra, imprecise bits. 
+    // +1: Divide the last power-of-10 that we postponed earlier to do rounding. 
+    auto const truncated = divide_power10<Rep>(magnitude, floor_pow10 + 1);
+    magnitude            = multiply_power10<Rep>(truncated, floor_pow10);
+  } else {
+    magnitude /= 10; //Apply the last power of 10
+  }
+
+  // Reapply the sign and return
+  // NOTE: Cast can overflow!
+  auto const signed_magnitude = static_cast<Rep>(magnitude);
+  return is_negative ? -signed_magnitude : signed_magnitude;
+}
+
+/**
  * @brief Perform floating-point -> integer decimal conversion
  *
  * @tparam Rep The type of integer we are converting to, to store the decimal value
