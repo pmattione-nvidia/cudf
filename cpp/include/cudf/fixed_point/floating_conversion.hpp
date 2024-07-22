@@ -1066,8 +1066,10 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
 
   // Spark often wants to round the last decimal place, so we'll perform the conversion
   // with one lower power of 10 so that we can (optionally) round at the end. 
+  // Note that we can't round this way if we've requested the minimum power. 
   auto const pow10 = static_cast<int>(scale);
-  auto const shifting_pow10 = pow10 - 1;
+  bool const can_round = (pow10 != -38);
+  auto const shifting_pow10 = can_round ? pow10 - 1 : pow10;
 
   // Sometimes add half a bit to correct for compiler rounding text to nearest floating-point value. 
   // See comments in add_half_if_truncates(), with differences detailed below. 
@@ -1087,7 +1089,9 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
   }(significand, floating_pow2);
 
   // Main algorithm: Apply the powers of 2 and 10 (except for the last power-of-10)
-  auto magnitude = convert_floating_to_integral_shifting<Rep, double>(base2_value, shifting_pow10, pow2);
+  // Use larger type for conversion to avoid overflow for last power-of-10
+  using convert_type = std::conditional_t<std::is_same_v<Rep, std::int32_t>, std::int64_t, __int128_t>;
+  auto magnitude = convert_floating_to_integral_shifting<convert_type, double>(base2_value, shifting_pow10, pow2);
 
   // Spark wants to floor the last digits of the output, clearing data that was beyond the 
   // precision that was available in double. 
@@ -1095,28 +1099,33 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
   // From the decimal digit corresponding to pow2 (just past double precision) to the end (pow10). 
   // The conversion from pow2 to pow10 is log10(2), which is ~ 90/299 (close enough for ints)
   int const floor_pow10 = (90 * pow2) / 299 - pow10;
-  if (floor_pow10 < 0) {
-    // Truncated: The scale factor cut off the extra, imprecise bits. 
-    // To round to the final decimal place, add 5 to one past the last decimal place
-    magnitude += 5U;
-    magnitude /= 10U; //Apply the last power of 10
-  } else {
-    // We are keeping decimal digits with data beyond the precision of double
-    // We want to truncate these digits, but sometimes we want to round first
-    // We will round if and only if we didn't already add a half-bit earlier
-    if constexpr (cuda::std::is_same_v<FloatingType, double>) {
-      // For doubles, only round the extra digits of whole numbers
-      // If it was not a whole number, we already added 1/2 a bit at higher precision than this earlier. 
-      if (is_whole_number) {
+  if (can_round) {
+    if (floor_pow10 < 0) {
+      // Truncated: The scale factor cut off the extra, imprecise bits. 
+      // To round to the final decimal place, add 5 to one past the last decimal place
+      magnitude += 5U;
+      magnitude /= 10U; //Apply the last power of 10
+    } else {
+      // We are keeping decimal digits with data beyond the precision of double
+      // We want to truncate these digits, but sometimes we want to round first
+      // We will round if and only if we didn't already add a half-bit earlier
+      if constexpr (cuda::std::is_same_v<FloatingType, double>) {
+        // For doubles, only round the extra digits of whole numbers
+        // If it was not a whole number, we already added 1/2 a bit at higher precision than this earlier. 
+        if (is_whole_number) {
+          magnitude += multiply_power10<Rep>(decltype(magnitude)(5), floor_pow10);
+        }
+      } else {
+        // Input was float: we didn't add a half-bit earlier, so round at the edge of precision here. 
         magnitude += multiply_power10<Rep>(decltype(magnitude)(5), floor_pow10);
       }
-    } else {
-      // Input was float: we didn't add a half-bit earlier, so round at the edge of precision here. 
-      magnitude += multiply_power10<Rep>(decltype(magnitude)(5), floor_pow10);
-    }
 
-    // +1: Divide the last power-of-10 that we postponed earlier to do rounding. 
-    auto const truncated = divide_power10<Rep>(magnitude, floor_pow10 + 1);
+      // +1: Divide the last power-of-10 that we postponed earlier to do rounding. 
+      auto const truncated = divide_power10<Rep>(magnitude, floor_pow10 + 1);
+      magnitude            = multiply_power10<Rep>(truncated, floor_pow10);
+    }
+  } else if (floor_pow10 > 0) {
+    auto const truncated = divide_power10<Rep>(magnitude, floor_pow10);
     magnitude            = multiply_power10<Rep>(truncated, floor_pow10);
   }
 
