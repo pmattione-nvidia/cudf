@@ -1064,11 +1064,22 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
   auto const is_negative                  = converter::get_is_negative(integer_rep);
   auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
 
+  auto const pow10 = static_cast<int>(scale);
+  auto rounding_wont_overflow = [&](){
+    auto const scale_factor = multiply_power10<Rep>(cuda::std::make_unsigned_t<Rep>{1}, -pow10);
+    auto const unsigned_floating = (floating < 0) ? -floating : floating;
+    return 10 * double(unsigned_floating) * scale_factor < cuda::std::numeric_limits<Rep>::max();
+  };
+
   // Spark often wants to round the last decimal place, so we'll perform the conversion
   // with one lower power of 10 so that we can (optionally) round at the end. 
   // Note that we can't round this way if we've requested the minimum power. 
-  auto const pow10 = static_cast<int>(scale);
-  bool const can_round = (pow10 != -38);
+  bool can_round;
+  if constexpr (!cuda::std::is_same_v<Rep, __int128_t>) {
+    can_round = true;
+  } else {
+    can_round = rounding_wont_overflow();
+  }
   auto const shifting_pow10 = can_round ? pow10 - 1 : pow10;
 
   // Sometimes add half a bit to correct for compiler rounding text to nearest floating-point value. 
@@ -1079,26 +1090,36 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
     if constexpr (cuda::std::is_same_v<FloatingType, double>) {
       // Add the 1/2 bit regardless of truncation, but still not for whole numbers
       auto const base2_value = (significand << 1) + static_cast<decltype(significand)>(!is_whole_number);
-      return std::make_pair(base2_value, floating_pow2 - 1);
+      return cuda::std::make_pair(base2_value, floating_pow2 - 1);
     } else {
       // Input was float: never add 1/2 bit. 
       // Why? Because we converted to double, and the 1/2 bit beyond float is WAY too large compared
       // to double's precision. And the 1/2 bit beyond double is not due to user input. 
-      return std::make_pair(significand << 1, floating_pow2 - 1);
+      return cuda::std::make_pair(significand << 1, floating_pow2 - 1);
     }
   }(significand, floating_pow2);
 
   // Main algorithm: Apply the powers of 2 and 10 (except for the last power-of-10)
   // Use larger type for conversion to avoid overflow for last power-of-10
-  using convert_type = std::conditional_t<std::is_same_v<Rep, std::int32_t>, std::int64_t, __int128_t>;
-  auto magnitude = convert_floating_to_integral_shifting<convert_type, double>(base2_value, shifting_pow10, pow2);
+  using convert_type = cuda::std::conditional_t<cuda::std::is_same_v<Rep, std::int32_t>, std::int64_t, __int128_t>;
+  cuda::std::make_unsigned_t<convert_type> magnitude;
+  if constexpr (cuda::std::is_same_v<Rep, std::int32_t>) {
+    if (rounding_wont_overflow()) {
+      magnitude = convert_floating_to_integral_shifting<Rep, double>(base2_value, shifting_pow10, pow2);
+    } else {
+      magnitude = convert_floating_to_integral_shifting<std::int64_t, double>(base2_value, shifting_pow10, pow2);
+    }
+  } else {
+    magnitude = convert_floating_to_integral_shifting<__int128_t, double>(base2_value, shifting_pow10, pow2);
+  }
 
   // Spark wants to floor the last digits of the output, clearing data that was beyond the 
   // precision that was available in double. 
   // How many digits do we need to floor? 
   // From the decimal digit corresponding to pow2 (just past double precision) to the end (pow10). 
   // The conversion from pow2 to pow10 is log10(2), which is ~ 90/299 (close enough for ints)
-  int const floor_pow10 = (90 * pow2) / 299 - pow10;
+  int const floor_pow10 = (90 * pow2 + 298 * is_whole_number) / 299 - pow10;
+  //is_whole_number
   if (can_round) {
     if (floor_pow10 < 0) {
       // Truncated: The scale factor cut off the extra, imprecise bits. 
