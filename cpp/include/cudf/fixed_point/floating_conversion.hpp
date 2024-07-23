@@ -1065,9 +1065,9 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
   auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
 
   auto const pow10 = static_cast<int>(scale);
+  auto const unsigned_floating = (floating < 0) ? -floating : floating;
   auto rounding_wont_overflow = [&](){
     auto const scale_factor = multiply_power10<Rep>(cuda::std::make_unsigned_t<Rep>{1}, -pow10);
-    auto const unsigned_floating = (floating < 0) ? -floating : floating;
     return 10 * double(unsigned_floating) * scale_factor < cuda::std::numeric_limits<Rep>::max();
   };
 
@@ -1115,11 +1115,22 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
 
   // Spark wants to floor the last digits of the output, clearing data that was beyond the 
   // precision that was available in double. 
+
   // How many digits do we need to floor? 
   // From the decimal digit corresponding to pow2 (just past double precision) to the end (pow10). 
-  // The conversion from pow2 to pow10 is log10(2), which is ~ 90/299 (close enough for ints)
-  int const floor_pow10 = (90 * pow2 + 298 * is_whole_number) / 299 - pow10;
-  //is_whole_number
+  int const floor_pow10 = [&](int pow2_bit){
+    // The conversion from pow2 to pow10 is log10(2), which is ~ 90/299 (close enough for ints)
+    // But Spark chooses the rougher 3/10 ratio instead of 90/299
+    if constexpr (cuda::std::is_same_v<FloatingType, float>) {
+      return 3 * pow2_bit / 10 - pow10;
+    } else {
+      // Spark rounds up the power-of-10 to floor for DOUBLES >= 2^63 (and yes, this is the exact cutoff)
+      bool const round_up = (unsigned_floating > std::numeric_limits<std::int64_t>::max());
+      return (3 * pow2_bit + 9 * round_up) / 10 - pow10;
+    }
+  }(pow2);
+
+  // Floor end digits
   if (can_round) {
     if (floor_pow10 < 0) {
       // Truncated: The scale factor cut off the extra, imprecise bits. 
