@@ -1122,11 +1122,11 @@ CUDF_HOST_DEVICE inline Rep convert_floating_to_integral_SPARK_RAPIDS(FloatingTy
     // The conversion from pow2 to pow10 is log10(2), which is ~ 90/299 (close enough for ints)
     // But Spark chooses the rougher 3/10 ratio instead of 90/299
     if constexpr (cuda::std::is_same_v<FloatingType, float>) {
-      return 3 * pow2_bit / 10 - pow10;
+      return (3 * pow2_bit - 10 * pow10) / 10;
     } else {
       // Spark rounds up the power-of-10 to floor for DOUBLES >= 2^63 (and yes, this is the exact cutoff)
       bool const round_up = (unsigned_floating > std::numeric_limits<std::int64_t>::max());
-      return (3 * pow2_bit + 9 * round_up) / 10 - pow10;
+      return (3 * pow2_bit - 10 * pow10 + 9 * round_up) / 10;
     }
   }(pow2);
 
