@@ -448,6 +448,75 @@ static __device__ int gpuUpdateValidityAndRowIndicesFlat(
   return valid_count;
 }
 
+// NOTE: Don't enter here if def is nullptr!
+template <int decode_block_size, bool has_nesting_t, typename state_buf, typename level_t>
+static __device__ int gpuPreProcessDefLevels(int32_t target_value_count,
+                                             page_state_s* s,
+                                             level_t const* const def,
+                                             int t)
+{
+  // Spin through def levels until we are within decode_block_size of target_value_count
+  // This is useful for skipping rows during chunked reads
+  constexpr int num_warps      = decode_block_size / cudf::detail::warp_size;
+  constexpr int max_batch_size = num_warps * cudf::detail::warp_size;
+
+  // how many (input) values we've processed in the page so far
+  int value_count = s->input_value_count;
+
+  int const max_depth       = s->col.max_nesting_depth - 1;
+  int max_depth_valid_count = s->nesting_info[max_depth].valid_count;
+
+  __syncthreads();
+
+  while ((value_count + max_batch_size) <= target_value_count) {
+    int const block_value_count = max_batch_size;
+
+    // definition level
+    auto const def_index = rolling_index<state_buf::nz_buf_size>(value_count + t);
+    auto const def_level = static_cast<int>(def[def_index]);
+
+    auto scan_block = [&](int d_idx) {
+      auto& ni     = s->nesting_info[d_idx];
+      int is_valid = (def_level >= ni.max_def_level) ? 1 : 0;
+
+      // block validity count
+      using block_scan = cub::BlockScan<int, decode_block_size>;
+      __shared__ typename block_scan::TempStorage scan_storage;
+      int thread_valid_count, block_valid_count;
+      block_scan(scan_storage).ExclusiveSum(is_valid, thread_valid_count, block_valid_count);
+
+      if (t == 0) {
+        ni.valid_count += block_valid_count;
+        ni.null_count += block_value_count - block_valid_count;
+      }
+
+      return block_valid_count;
+    };
+
+    if constexpr (!has_nesting_t) {
+      max_depth_valid_count += scan_block(0);
+    } else {
+      // iterate by depth
+      for (int d_idx = 0; d_idx <= max_depth; d_idx++) {
+        int block_valid_count = scan_block(d_idx);
+        if (d_idx == max_depth) { max_depth_valid_count += block_valid_count; }
+      }
+    }
+
+    // update stuff
+    value_count += block_value_count;
+  }  // end loop
+
+  if (t == 0) {
+    // update valid value count for decoding and total # of values we've processed
+    s->nz_count          = max_depth_valid_count;
+    s->input_value_count = value_count;
+    s->input_row_count   = value_count;
+  }
+
+  return max_depth_valid_count;
+}
+
 // is the page marked nullable or not
 __device__ inline bool is_nullable(page_state_s* s)
 {
@@ -473,6 +542,22 @@ __device__ inline bool maybe_has_nulls(page_state_s* s)
 
   // the encoded repeated value isn't valid, we have (all) nulls
   return run_val != s->col.max_level[lvl];
+}
+
+template <int decode_block_size_t, typename stream_type>
+__device__ int skip_decode(stream_type& parquet_stream, int num_to_skip, int t)
+{
+  // it could be that (e.g.) we skip 5000 but starting at row 4000 we have a run of length 2000:
+  // in that case skip_decode() only skips 4000, and we have to process the remaining 1000 up front
+  // modulo 2 * block_size of course, since that's as many as we process at once
+  int num_skipped = parquet_stream.skip_decode(t, num_to_skip);
+  while (num_skipped < num_to_skip) {
+    auto const to_decode = min(2 * decode_block_size_t, num_to_skip - num_skipped);
+    num_skipped += parquet_stream.decode_next(t, to_decode);
+    __syncthreads();
+  }
+
+  return num_skipped;
 }
 
 /**
@@ -603,6 +688,48 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t)
   //   and valid_count is that running count.
   int processed_count = 0;
   int valid_count     = 0;
+
+  // If skipping rows skip their decoding also, & skip the below loop ahead to the appropriate
+  // processed_count NOTE: This is only valid for non-lists
+  if (s->first_row > 0) {  // else not skipping rows
+    if (!should_process_nulls ||
+        (def == nullptr)) {  // no def levels to process, everything is valid
+      if constexpr (has_dict_t) {
+        // skip dictionary decode
+        processed_count = skip_decode<decode_block_size_t>(dict_stream, s->first_row, t);
+        valid_count     = processed_count;
+      } else {
+        // no rle_streams at all, just set variables to skip meaningless loops over processed_count
+        processed_count = s->first_row;
+        valid_count     = s->first_row;
+      }
+      if (t == 0) {
+        int const max_depth = s->col.max_nesting_depth - 1;
+        auto& ni            = s->nesting_info[max_depth];
+        ni.valid_count      = valid_count;
+        ni.value_count      = processed_count;  // TODO: remove? this is unused in the non-list path
+        s->nz_count         = valid_count;
+        s->input_value_count = processed_count;
+        s->input_row_count   = valid_count;
+      }
+    } else {
+      // has def-levels, #rows != #valids
+      // if no dictionary nothing to skip, this is basically identical to the as-is loop code below
+      if constexpr (has_dict_t) {
+        // pre-process def_level to see how much of dictionary encoding we can skip
+        while ((processed_count + rolling_buf_size) <= s->first_row) {
+          processed_count += def_decoder.decode_next(t);
+          __syncthreads();
+          valid_count = gpuPreProcessDefLevels<decode_block_size_t, has_nesting_t, state_buf_t>(
+            processed_count, s, def, t);
+          __syncthreads();
+        }
+        skip_decode<decode_block_size_t>(dict_stream, valid_count, t);
+      }
+    }
+  }
+  __syncthreads();
+
   // the core loop. decode batches of level stream data using rle_stream objects
   // and pass the results to gpuDecodeValues
   while (s->error == 0 && processed_count < s->page.num_input_values) {
