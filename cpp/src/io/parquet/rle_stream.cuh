@@ -156,6 +156,7 @@ struct rle_run {
   uint8_t const* start_pos;
   bool literal_run;  // true if literal run, false if repeated run
   int remaining_count;  // number of output items remaining to be decoded
+  int offset_count;
 };
 
 // a stream of rle_runs
@@ -187,6 +188,9 @@ struct rle_stream {
   int run_fill_index;
   int decode_run_index;
 
+  int last_run_bytes;
+  int last_run_remaining_count;
+
   __device__ rle_stream(rle_run* _runs) : runs(_runs) {}
 
   __device__ inline bool is_last_decode_warp(int warp_id)
@@ -212,6 +216,9 @@ struct rle_stream {
     num_values_processed   = 0;
     run_fill_index   = 0;
     decode_run_index = -1;  // signals the first iteration. Nothing to decode.
+
+    last_run_bytes = 0;
+    last_run_remaining_count = 0;
   }
 
   __device__ inline int get_rle_run_info(rle_run& run)
@@ -237,6 +244,60 @@ struct rle_stream {
     run.start_pos = start_pos;
 
     return run_bytes;
+  }
+
+  __device__ inline void fill_run_batch_gera()
+  {
+    // decode_run_index == -1 means we are on the very first decode iteration for this stream.
+    // In this first iteration we are filling up to half of the runs array to decode in the next
+    // iteration. On subsequent iterations, decode_run_index >= 0 and we are going to fill as many run
+    // slots available as we can, to fill up to the slot before decode_run_index. We are also always
+    // bound by stream_end, making sure we stop decoding once we've reached the end of the stream.
+    while (((decode_run_index == -1 && run_fill_index < num_rle_stream_decode_warps) ||
+            run_fill_index < decode_run_index + run_buffer_size) &&
+           stream_next_run_start < stream_end) {
+      // Encoding::RLE
+      // Pass by reference to fill the runs shared memory with the run data
+      auto& run           = runs[rolling_index<run_buffer_size>(run_fill_index)];
+
+      //output_count / #-decoding-warps = 2 * 128 / 3 = 85
+      //but, if e.g. the other runs are length 1, then will wait for this damn thing to finish
+      //instead, just 32! Then we shouldn't have to loop in decode()
+      static constexpr int run_granularity = 96;
+
+      // Encoding::RLE
+      // bytes for the varint header
+      if (last_run_remaining_count == 0) {
+        int const run_bytes = get_rle_run_info(run);
+        last_run_bytes = run_bytes;
+
+        int const batch_count = min(run_granularity, run.count);
+        last_run_remaining_count = run.count - batch_count;
+
+        run.output_index = output_index;
+        run.remaining_count  = batch_count;
+        run.offset_count = 0;
+      } else {
+        auto& prior_run = runs[rolling_index<run_buffer_size>(run_fill_index - 1)];
+        int const batch_count = min(run_granularity, last_run_remaining_count);
+
+        //This HAPPENS to be safe, as the warp working on prior_run only updates 
+        //remaining_count & offset_count, which aren't read here. 
+        run.output_index = prior_run.output_index;
+        run.start_pos      = prior_run.start_pos;
+        run.literal_run  = prior_run.literal_run;
+        run.count       = prior_run.count;
+
+        run.remaining_count  = batch_count;
+        run.offset_count = run.count - last_run_remaining_count; //CAN THIS BE CALCULATED
+        last_run_remaining_count -= batch_count;
+      }
+      if (last_run_remaining_count == 0) {
+        stream_next_run_start += last_run_bytes;
+        output_index += run.count;
+      }
+      run_fill_index++;
+    }
   }
 
   __device__ inline void fill_run_batch()
@@ -307,7 +368,7 @@ struct rle_stream {
         // fill the next set of runs. fill_runs will generally be the bottleneck for any
         // kernel that uses an rle_stream.
         if (warp_lane == 0) {
-          fill_run_batch();
+          fill_run_batch_gera();
           if (decode_run_index == -1) {
             // first time, set it to the beginning of the buffer (rolled)
             decode_run_index        = 0;
@@ -328,9 +389,9 @@ struct rle_stream {
         int const max_count = num_values_processed + output_count;
         // run.output_index is absolute index, we start decoding
         // if it's supposed to fit in this call to `decode_next`.
-        if (max_count > run.output_index) {
+        if (max_count > run.output_index + run.offset_count) {
           int remaining_count        = run.remaining_count;
-          int const run_offset_count = run.count - remaining_count;
+          int const run_offset_count = run.offset_count;
           // last_run_index is the absolute position of the run, including
           // what was decoded last time.
           int const last_run_index = run.output_index + run_offset_count;
@@ -364,6 +425,7 @@ struct rle_stream {
               decode_run_index_shared = run_index + 1;
             }
             run.remaining_count = remaining_count;
+            run.offset_count = run_offset_count + batch_count;
           }
         }
       }
