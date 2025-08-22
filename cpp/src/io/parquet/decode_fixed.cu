@@ -19,6 +19,7 @@
 #include "parquet_gpu.hpp"
 #include "rle_stream.cuh"
 
+#include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
 
 #include <cooperative_groups.h>
@@ -867,33 +868,6 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
   return max_depth_valid_count;
 }
 
-// is the page marked nullable or not
-__device__ inline bool is_nullable(page_state_s* s)
-{
-  auto const lvl           = level_type::DEFINITION;
-  auto const max_def_level = s->col.max_level[lvl];
-  return max_def_level > 0;
-}
-
-// for a nullable page, check to see if it could have nulls
-__device__ inline bool maybe_has_nulls(page_state_s* s)
-{
-  auto const lvl      = level_type::DEFINITION;
-  auto const init_run = s->initial_rle_run[lvl];
-  // literal runs, lets assume they could hold nulls
-  if (is_literal_run(init_run)) { return true; }
-
-  // repeated run with number of items in the run not equal
-  // to the rows in the page, assume that means we could have nulls
-  if (s->page.num_input_values != (init_run >> 1)) { return true; }
-
-  auto const lvl_bits = s->col.level_bits[lvl];
-  auto const run_val  = lvl_bits == 0 ? 0 : s->initial_rle_value[lvl];
-
-  // the encoded repeated value isn't valid, we have (all) nulls
-  return run_val != s->col.max_level[lvl];
-}
-
 template <int decode_block_size_t, typename state_buf>
 inline __device__ void bool_plain_decode(page_state_s* s, state_buf* sb, int t, int to_decode)
 {
@@ -994,6 +968,132 @@ constexpr bool is_split_decode()
 }
 
 /**
+ * @brief Parse the beginning of the level section (definition or repetition),
+ * initializes the initial RLE run & value, and returns the section length
+ *
+ * @param[in,out] s The page state
+ * @param[in] cur The current data position
+ * @param[in] end The end of the data
+ * @param[in] lvl Enum indicating whether this is to initialize repetition or definition level data
+ *
+ * @return Pair: initial_rle_run, initial_rle_value
+ */
+inline __device__ null_state extract_null_state(const PageInfo& page, const ColumnChunkDesc& col)
+{
+  uint8_t* cur = page.page_data;
+  uint8_t* end = cur + page.uncompressed_page_size;
+
+  // Skip over the repetition level section
+  int32_t len;
+  bool is_v2_page = (page.flags & PAGEINFO_FLAGS_V2) != 0;
+  {
+    level_type lvl       = level_type::REPETITION;
+    int const level_bits = col.level_bits[lvl];
+    auto const encoding  = page.repetition_level_encoding;
+
+    if (is_v2_page && (len = page.lvl_bytes[lvl]) != 0) {
+      // V2 only uses RLE encoding so no need to check encoding
+      cur += len;
+    } else if (level_bits == 0) {
+      // do nothing
+    } else if (encoding == Encoding::RLE) {  // V1 header with RLE encoding
+      if (cur + 4 < end) { cur += (cur[0]) + (cur[1] << 8) + (cur[2] << 16) + (cur[3] << 24) + 4; }
+    } else if (encoding == Encoding::BIT_PACKED) {
+      cur += (page.num_input_values * level_bits + 7) >> 3;
+    }
+  }
+
+  // Decode initial run and value for definition level
+  level_type lvl           = level_type::DEFINITION;
+  int const level_bits     = col.level_bits[lvl];
+  auto const encoding      = page.definition_level_encoding;
+  auto const max_def_level = col.max_level[lvl];
+
+  auto init_rle = [&](uint8_t const* cur, uint8_t const* end) {
+    uint32_t const run = get_vlq32(cur, end);
+    if (is_literal_run(run)) {
+      return null_state::MAYBE_NULLS;  // assume that literal runs could hold nulls
+    }
+
+    // repeated run with number of items in the run not equal
+    // to the rows in the page, assume that means we could have nulls
+    if (page.num_input_values != (run >> 1)) { return null_state::MAYBE_NULLS; }
+
+    int32_t initial_rle_value = 0;
+    if (cur < end) {
+      initial_rle_value = cur[0];
+      cur++;
+      if (level_bits > 8) { initial_rle_value |= ((cur < end) ? cur[0] : 0) << 8; }
+    }
+
+    // the encoded repeated value is/isn't valid, we have no/all nulls
+    return (initial_rle_value == max_def_level) ? null_state::NO_NULLS : null_state::ALL_NULLS;
+  };
+
+  // this is a little redundant. if level_bits == 0, then nothing should be encoded
+  // for the level, but some V2 files in the wild violate this and encode the data anyway.
+  // thus we will handle V2 headers separately.
+  if (is_v2_page && (len = page.lvl_bytes[lvl]) != 0) {
+    // V2 only uses RLE encoding so no need to check encoding
+    return init_rle(cur, cur + len);
+  } else if (level_bits == 0) {
+    return (max_def_level == 0) ? null_state::NO_NULLS : null_state::ALL_NULLS;
+  } else if (encoding == Encoding::RLE) {  // V1 header with RLE encoding
+    if (cur + 4 < end) {
+      len = (cur[0]) + (cur[1] << 8) + (cur[2] << 16) + (cur[3] << 24);
+      cur += 4;
+      return init_rle(cur, cur + len);
+    }
+    return null_state::NO_NULLS;  // error state: no definition data
+  } else if (encoding == Encoding::BIT_PACKED) {
+    return null_state::MAYBE_NULLS;  // assume that (literal) bit packed runs could hold nulls
+  } else {
+    return null_state::NO_NULLS;  // error state: unsupported encoding
+  }
+}
+
+/**
+ * @brief Kernel for computing fixed width non dictionary column data stored in the pages
+ *
+ * This function will write the page data and the page data's validity to the
+ * output specified in the page's column chunk. If necessary, additional
+ * conversion will be performed to translate from the Parquet datatype to
+ * desired output datatype.
+ *
+ * @param pages List of pages
+ * @param chunks List of column chunks
+ * @param page_mask Boolean vector indicating which pages need to be decoded
+ */
+// template <decode_kernel_mask kernel_mask_t>
+CUDF_KERNEL void decode_null_state(PageInfo* pages,
+                                   device_span<ColumnChunkDesc const> chunks,
+                                   cudf::device_span<bool const> page_mask,
+                                   size_t num_pages)
+{
+  auto const page_idx = cg::this_grid().thread_rank();
+  if (page_idx >= num_pages) { return; }
+
+  PageInfo& page             = pages[page_idx];
+  const ColumnChunkDesc& col = chunks[page.chunk_idx];
+
+  // If not decoding the page, or it's a dictionary page, or it has no input values, or it does not
+  // pass the filter condition, skip
+  if (not page_mask[page_idx]) { return; }
+  // if (!(BitAnd(page.kernel_mask, kernel_mask_t))) { return; }
+  if ((page.flags & PAGEINFO_FLAGS_DICTIONARY) != 0) { return; }
+  if (page.num_input_values <= 0) { return; }
+
+  auto maybe_has_nulls = [&]() {
+    auto const max_def_level = col.max_level[level_type::DEFINITION];
+    if (max_def_level == 0) { return null_state::NO_NULLS; }
+
+    return extract_null_state(page, col);
+  };
+
+  page.page_null_state = maybe_has_nulls();
+}
+
+/**
  * @brief Kernel for computing fixed width non dictionary column data stored in the pages
  *
  * This function will write the page data and the page data's validity to the
@@ -1009,7 +1109,10 @@ constexpr bool is_split_decode()
  * @param initial_str_offsets Vector to store the initial offsets for large nested string cols
  * @param error_code Error code to set if an error is encountered
  */
-template <typename level_t, int decode_block_size_t, decode_kernel_mask kernel_mask_t>
+template <typename level_t,
+          int decode_block_size_t,
+          decode_kernel_mask kernel_mask_t,
+          bool process_nulls_t>
 CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   decode_page_data_generic(PageInfo* pages,
                            device_span<ColumnChunkDesc const> chunks,
@@ -1045,6 +1148,12 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   PageInfo* pp          = &pages[page_idx];
 
   if (!(BitAnd(pages[page_idx].kernel_mask, kernel_mask_t))) { return; }
+
+  if constexpr (process_nulls_t) {
+    if (pp->page_null_state == null_state::NO_NULLS) { return; }
+  } else {
+    if (pp->page_null_state != null_state::NO_NULLS) { return; }
+  }
 
   // must come after the kernel mask check
   [[maybe_unused]] null_count_back_copier _{s, t};
@@ -1083,14 +1192,33 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
     return;
   }
 
-  bool const should_process_nulls = is_nullable(s) && maybe_has_nulls(s);
+  if constexpr (process_nulls_t) {
+    if (pp->page_null_state == null_state::ALL_NULLS) {
+      auto const max_depth     = s->col.max_nesting_depth - 1;
+      auto const& nesting_info = s->nesting_info[max_depth];
+      fill_validity_map<decode_block_size_t, true>(
+        s, nesting_info.valid_map_offset, s->page.num_rows, t);
+      // Update PageInfo stats (same as pruned pages)
+      pp->num_nulls  = pp->num_rows;
+      pp->num_valids = 0;
+      // Update offsets for all list depth levels
+      if constexpr (has_lists_t) { update_list_offsets_for_pruned_pages<decode_block_size_t>(s); }
+      // Update string offsets or write string sizes for small and large strings respectively
+      if constexpr (has_strings_t) {
+        update_string_offsets_for_pruned_pages<decode_block_size_t, has_lists_t>(
+          s, initial_str_offsets, pages[page_idx]);
+      }
+      return;
+    }
+  }
 
   // shared buffer. all shared memory is suballocated out of here
   constexpr int rle_run_buffer_bytes =
     cudf::util::round_up_unsafe(rle_run_buffer_size * sizeof(rle_run), size_t{16});
-  constexpr int shared_buf_size =
+  constexpr int shared_buf_size_needed =
     rle_run_buffer_bytes * (static_cast<int>(has_dict_t) + static_cast<int>(has_bools_t) +
-                            static_cast<int>(has_lists_t) + 1);
+                            static_cast<int>(has_lists_t) + static_cast<int>(process_nulls_t));
+  constexpr int shared_buf_size = shared_buf_size_needed > 0 ? shared_buf_size_needed : 1;
   __shared__ __align__(16) uint8_t shared_buf[shared_buf_size];
 
   // setup all shared memory buffers
@@ -1110,7 +1238,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   // initialize the stream decoders (requires values computed in setup_local_page_info)
   rle_stream<level_t, decode_block_size_t, rolling_buf_size> def_decoder{def_runs};
   level_t* const def = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::DEFINITION]);
-  if (should_process_nulls) {
+  if constexpr (process_nulls_t) {
     def_decoder.init(s->col.level_bits[level_type::DEFINITION],
                      s->abs_lvl_start[level_type::DEFINITION],
                      s->abs_lvl_end[level_type::DEFINITION],
@@ -1154,12 +1282,14 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   int processed_count         = 0;
   int valid_count             = 0;
   size_t string_output_offset = 0;
+  // int const init_valid_map_offset = s->nesting_info[s->col.max_nesting_depth -
+  // 1].valid_map_offset;
 
   // Skip ahead in the decoding so that we don't repeat work (skipped_leaf_values = 0 for non-lists)
   auto const skipped_leaf_values = s->page.skipped_leaf_values;
   if constexpr (has_lists_t) {
     if (skipped_leaf_values > 0) {
-      if (should_process_nulls) {
+      if constexpr (process_nulls_t) {
         skip_decode<rolling_buf_size>(def_decoder, skipped_leaf_values, t);
       }
       processed_count = skip_decode<rolling_buf_size>(rep_decoder, skipped_leaf_values, t);
@@ -1182,7 +1312,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
     int next_valid_count;
 
     // only need to process definition levels if this is a nullable column
-    if (should_process_nulls) {
+    if constexpr (process_nulls_t) {
       processed_count += def_decoder.decode_next(t);
       block.sync();
 
@@ -1266,6 +1396,14 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
       convert_small_string_lengths_to_offsets<decode_block_size_t, has_lists_t>(s);
     }
   }
+  /*
+    if constexpr (!process_nulls_t) {
+      auto const& ni           = s->nesting_info[s->col.max_nesting_depth - 1];
+      int const num_values = has_lists_t ? ni.valid_map_offset - init_valid_map_offset :
+    s->num_rows; fill_validity_map<decode_block_size_t, false>(s, init_valid_map_offset, num_values,
+    t);
+    }
+  */
   if (t == 0 and s->error != 0) { set_error(s->error, error_code); }
 }
 
@@ -1278,19 +1416,21 @@ template <int value>
 using int_tag_t = std::integral_constant<int, value>;
 
 /**
- * @copydoc cudf::io::paruquet::detail::decode_page_data
+ * @copydoc cudf::io::paruquet::detail::decode_page_data_generic
  */
-void decode_page_data(cudf::detail::hostdevice_span<PageInfo> pages,
-                      cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
-                      size_t num_rows,
-                      size_t min_row,
-                      int level_type_size,
-                      decode_kernel_mask kernel_mask,
-                      cudf::device_span<bool const> page_mask,
-                      cudf::device_span<size_t> initial_str_offsets,
-                      kernel_error::pointer error_code,
-                      rmm::cuda_stream_view stream)
+void decode_page_data_generic(cudf::detail::hostdevice_span<PageInfo> pages,
+                              cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+                              size_t num_rows,
+                              size_t min_row,
+                              int level_type_size,
+                              decode_kernel_mask kernel_mask,
+                              cudf::device_span<bool const> page_mask,
+                              cudf::device_span<size_t> initial_str_offsets,
+                              kernel_error::pointer error_code,
+                              rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
+
   // No template parameters on lambdas until C++20, so use type tags instead
   auto launch_kernel = [&](auto block_size_tag, auto kernel_mask_tag) {
     constexpr int decode_block_size   = decltype(block_size_tag)::value;
@@ -1300,7 +1440,15 @@ void decode_page_data(cudf::detail::hostdevice_span<PageInfo> pages,
     dim3 dim_grid(pages.size(), 1);  // 1 threadblock per page
 
     if (level_type_size == 1) {
-      decode_page_data_generic<uint8_t, decode_block_size, mask>
+      decode_page_data_generic<uint8_t, decode_block_size, mask, true>
+        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                     chunks,
+                                                     min_row,
+                                                     num_rows,
+                                                     page_mask,
+                                                     initial_str_offsets,
+                                                     error_code);
+      decode_page_data_generic<uint8_t, decode_block_size, mask, false>
         <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
                                                      chunks,
                                                      min_row,
@@ -1309,7 +1457,15 @@ void decode_page_data(cudf::detail::hostdevice_span<PageInfo> pages,
                                                      initial_str_offsets,
                                                      error_code);
     } else {
-      decode_page_data_generic<uint16_t, decode_block_size, mask>
+      decode_page_data_generic<uint16_t, decode_block_size, mask, true>
+        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                     chunks,
+                                                     min_row,
+                                                     num_rows,
+                                                     page_mask,
+                                                     initial_str_offsets,
+                                                     error_code);
+      decode_page_data_generic<uint16_t, decode_block_size, mask, false>
         <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
                                                      chunks,
                                                      min_row,
@@ -1391,6 +1547,23 @@ void decode_page_data(cudf::detail::hostdevice_span<PageInfo> pages,
       break;
     default: CUDF_EXPECTS(false, "Kernel type not handled by this function"); break;
   }
+}
+
+void decode_page_null_states(cudf::detail::hostdevice_span<PageInfo> pages,
+                             cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+                             cudf::device_span<bool const> page_mask,
+                             rmm::cuda_stream_view stream)
+{
+  CUDF_FUNC_RANGE();
+
+  // each thread will process one page
+  static constexpr int block_size = 128;
+  int const grid_size             = cudf::util::div_rounding_up_unsafe(pages.size(), block_size);
+
+  decode_null_state<<<grid_size, block_size, 0, stream.value()>>>(
+    pages.device_ptr(), chunks, page_mask, pages.size());
+
+  stream.synchronize();
 }
 
 }  // namespace cudf::io::parquet::detail

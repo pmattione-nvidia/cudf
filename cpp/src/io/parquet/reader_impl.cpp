@@ -18,6 +18,7 @@
 
 #include "error.hpp"
 
+#include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/stream_compaction.hpp>
 #include <cudf/detail/structs/utilities.hpp>
 #include <cudf/detail/transform.hpp>
@@ -49,6 +50,8 @@ inline bool is_treat_fixed_length_as_string(std::optional<LogicalType> const& lo
 
 void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_rows)
 {
+  CUDF_FUNC_RANGE();
+
   auto& pass    = *_pass_itm_data;
   auto& subpass = *pass.subpass;
 
@@ -249,6 +252,10 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
     chunk_nested_str_data.host_to_device_async(_stream);
   }
 
+  // launch kernel for determining the null state of each page
+  cudf::io::parquet::detail::decode_page_null_states(
+    subpass.pages, pass.chunks, page_mask, _stream);
+
   // create this before we fork streams
   kernel_error error_code(_stream);
 
@@ -259,16 +266,16 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   int s_idx = 0;
 
   auto decode_data = [&](decode_kernel_mask decoder_mask) {
-    detail::decode_page_data(subpass.pages,
-                             pass.chunks,
-                             num_rows,
-                             skip_rows,
-                             level_type_size,
-                             decoder_mask,
-                             page_mask,
-                             initial_str_offsets,
-                             error_code.data(),
-                             streams[s_idx++]);
+    detail::decode_page_data_generic(subpass.pages,
+                                     pass.chunks,
+                                     num_rows,
+                                     skip_rows,
+                                     level_type_size,
+                                     decoder_mask,
+                                     page_mask,
+                                     initial_str_offsets,
+                                     error_code.data(),
+                                     streams[s_idx++]);
   };
 
   // launch string decoder for plain encoded flat columns
@@ -644,6 +651,8 @@ void reader_impl::populate_metadata(table_metadata& out_metadata)
 
 table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
 {
+  CUDF_FUNC_RANGE();
+
   // If `_output_metadata` has been constructed, just copy it over.
   auto out_metadata = _output_metadata ? table_metadata{*_output_metadata} : table_metadata{};
   out_metadata.schema_info.resize(_output_buffers.size());

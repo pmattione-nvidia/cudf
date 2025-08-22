@@ -1506,4 +1506,90 @@ inline __device__ bool setup_local_page_info(page_state_s* const s,
   return true;
 }
 
+/**
+ * @brief Fill the validity map for an ALL_NULLS page using all threads in the block
+ * @tparam[in] decode_block_size_t The block size to use for decoding
+ * @tparam[in] zero_out_t Whether to zero out or set the validity map to all 1s
+ * @param[in,out] s The page state
+ * @param[in] valid_map_offset The offset into the validity map to start filling
+ * @param[in] num_values The number of values to fill in the validity map
+ * @param[in] t The thread index
+ */
+template <int decode_block_size_t, bool zero_out_t>
+__device__ inline void fill_validity_map(page_state_s* s,
+                                         int valid_map_offset,
+                                         int num_values,
+                                         int t)
+{
+  // Use the validity map from the last nesting level (leaf level)
+  auto const max_depth = s->col.max_nesting_depth - 1;
+  auto& nesting_info   = s->nesting_info[max_depth];
+
+  if (num_values <= 0) return;
+  if (nesting_info.valid_map == nullptr) return;
+
+  if (t == 0) {
+    if constexpr (zero_out_t) {
+      nesting_info.null_count = num_values;
+    } else {
+      nesting_info.null_count = 0;
+    }
+  }
+
+  constexpr int mask_bit_size = sizeof(bitmask_type) * 8;
+  int32_t start_bit           = valid_map_offset;
+  int32_t end_bit             = start_bit + num_values;  // One past the last bit (exclusive)
+
+  int32_t start_word        = start_bit / mask_bit_size;
+  int32_t start_bit_in_word = start_bit % mask_bit_size;
+
+  int32_t end_word        = (end_bit - 1) / mask_bit_size;  // Last word containing data
+  int32_t end_bit_in_word = end_bit % mask_bit_size;
+
+  // if (t == 0)
+  //   printf("fill_validity_map: start_bit: %d, end_bit: %d, start_word: %d, end_word: %d,
+  //   start_bit_in_word: %d, end_bit_in_word: %d, valid_map: %p\n",
+  //     start_bit, end_bit, start_word, end_word, start_bit_in_word, end_bit_in_word,
+  //     nesting_info.valid_map);
+
+  // Phase 1: Thread 0 handles the first partial word (if not aligned)
+  if (t == 0 && start_bit_in_word != 0) {
+    int32_t bits_in_first_word = min(mask_bit_size - start_bit_in_word, num_values);
+    bitmask_type mask          = ((bitmask_type(1) << bits_in_first_word) - 1) << start_bit_in_word;
+    auto validity_map_word_ref =
+      cuda::atomic_ref<bitmask_type, cuda::thread_scope_device>(nesting_info.valid_map[start_word]);
+
+    // must store atomically, as another kernel on the prior page could be writing to the same word
+    if constexpr (zero_out_t) {
+      validity_map_word_ref.fetch_and(~mask, cuda::std::memory_order_relaxed);
+    } else {
+      validity_map_word_ref.fetch_or(mask, cuda::std::memory_order_relaxed);
+    }
+  }
+
+  // Phase 2: All threads work on full mask_bit_size-bit words in parallel
+  int32_t first_full_word = start_word + (start_bit_in_word != 0 ? 1 : 0);
+  int32_t last_full_word  = end_word - (end_bit_in_word != 0 ? 1 : 0);
+
+  for (int word_idx = first_full_word + t; word_idx <= last_full_word;
+       word_idx += decode_block_size_t) {
+    constexpr bitmask_type mask = zero_out_t ? 0 : cuda::std::numeric_limits<bitmask_type>::max();
+    nesting_info.valid_map[word_idx] = mask;
+  }
+
+  // Phase 3: Thread 0 handles the last partial word (if not aligned)
+  if (t == 0 && end_bit_in_word != 0 && end_word != start_word) {
+    uint32_t mask = (bitmask_type(1) << end_bit_in_word) - 1;
+    auto validity_map_word_ref =
+      cuda::atomic_ref<bitmask_type, cuda::thread_scope_device>(nesting_info.valid_map[end_word]);
+
+    // must store atomically, as another kernel on the next page could be writing to the same word
+    if constexpr (zero_out_t) {
+      validity_map_word_ref.fetch_and(~mask, cuda::std::memory_order_relaxed);
+    } else {
+      validity_map_word_ref.fetch_or(mask, cuda::std::memory_order_relaxed);
+    }
+  }
+}
+
 }  // namespace cudf::io::parquet::detail
