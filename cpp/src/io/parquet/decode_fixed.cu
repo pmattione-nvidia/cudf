@@ -367,7 +367,6 @@ __device__ int update_validity_and_row_indices_nested(
       // at the first value, even if that is before first_row, because we cannot trivially jump to
       // the correct position to start reading. since we are about to write the validity vector
       // here we need to adjust our computed mask to take into account the write row bounds.
-      int warp_null_count = 0;
       if (ni.valid_map != nullptr) {
         uint32_t const warp_validity_mask = ballot(is_valid);
         // lane 0 from each warp writes out validity
@@ -379,19 +378,12 @@ __device__ int update_validity_and_row_indices_nested(
           int const write_end =
             cudf::detail::warp_size - __clz(in_write_row_bounds);  // last bit in the warp to store
           int const bit_count = write_end - write_start;
-          warp_null_count     = bit_count - __popc(warp_validity_mask >> write_start);
 
           store_validity(bit_offset, ni.valid_map, warp_validity_mask >> write_start, bit_count);
         }
       }
 
-      // sum null counts. we have to do it this way instead of just incrementing by (value_count -
-      // valid_count) because valid_count also includes rows that potentially start before our row
-      // bounds. if we could come up with a way to clean that up, we could remove this and just
-      // compute it directly at the end of the kernel.
-      size_type const block_null_count =
-        cudf::detail::single_lane_block_sum_reduce<decode_block_size, 0>(warp_null_count);
-      if (t == 0) { ni.null_count += block_null_count; }
+      if (t == 0) { ni.null_count += (block_value_count - block_valid_count); }
 
       // if this is valid and we're at the leaf, output dst_pos
       if (d_idx == max_depth) {
@@ -418,6 +410,61 @@ __device__ int update_validity_and_row_indices_nested(
     s->input_value_count     = value_count;
     s->input_row_count       = value_count;
   }
+
+  return max_depth_valid_count;
+}
+
+/**
+ * @brief Skip validity and row indices for non-list types
+ *
+ * @tparam decode_block_size Size of the thread block
+ * @tparam level_t Definition level type
+ * @tparam state_buf State buffer type
+ *
+ * @param target_value_count The target value count to process
+ * @param s Pointer to  page state
+ * @param sb Pointer to  state buffer
+ * @param def Pointer to the definition levels
+ * @param t Thread index
+ *
+ * @return Maximum depth valid count after processing
+ */
+template <int decode_block_size, typename level_t, bool is_nested, int rolling_buf_size>
+__device__ int skip_validity_and_row_indices_nonlist(int value_count, 
+  int32_t target_value_count, page_state_s* s, level_t const* const def, int t)
+{
+  int const max_def_level = [&](){
+    if constexpr (is_nested) {
+      return s->nesting_info[s->col.max_nesting_depth - 1].max_def_level;
+    } else {
+      return 1;
+    }
+  }();
+
+  int max_depth_valid_count = 0;
+  while (value_count < target_value_count) {
+    int const batch_size = min(decode_block_size, target_value_count - value_count);
+
+    // definition level
+    int const is_valid = [&]() {
+      if (t >= batch_size) {
+        return 0;
+      } else if (def) {
+        int const def_level = static_cast<int>(def[rolling_index<rolling_buf_size>(value_count + t)]);
+        return (def_level >= max_def_level) ? 1 : 0;
+      }
+      return 1;
+    }();
+
+    // thread and block validity count
+    using block_scan = cub::BlockScan<int, decode_block_size>;
+    __shared__ typename block_scan::TempStorage scan_storage;
+    int thread_valid_count, block_valid_count;
+    block_scan(scan_storage).ExclusiveSum(is_valid, thread_valid_count, block_valid_count);
+
+    value_count += batch_size;
+    max_depth_valid_count += block_valid_count;
+  }  // end loop
 
   return max_depth_valid_count;
 }
@@ -498,7 +545,6 @@ __device__ int update_validity_and_row_indices_flat(
     // here we need to adjust our computed mask to take into account the write row bounds.
     int const in_write_row_bounds = ballot(row_index >= first_row && row_index < last_row);
     int const write_start = __ffs(in_write_row_bounds) - 1;  // first bit in the warp to store
-    int warp_null_count   = 0;
     // lane 0 from each warp writes out validity
     if ((write_start >= 0) && ((t % cudf::detail::warp_size) == 0)) {
       int const vindex     = value_count + thread_value_count;  // absolute input value index
@@ -507,18 +553,11 @@ __device__ int update_validity_and_row_indices_flat(
       int const write_end =
         cudf::detail::warp_size - __clz(in_write_row_bounds);  // last bit in the warp to store
       int const bit_count = write_end - write_start;
-      warp_null_count     = bit_count - __popc(warp_validity_mask >> write_start);
 
       store_validity(bit_offset, ni.valid_map, warp_validity_mask >> write_start, bit_count);
     }
 
-    // sum null counts. we have to do it this way instead of just incrementing by (value_count -
-    // valid_count) because valid_count also includes rows that potentially start before our row
-    // bounds. if we could come up with a way to clean that up, we could remove this and just
-    // compute it directly at the end of the kernel.
-    size_type const block_null_count =
-      cudf::detail::single_lane_block_sum_reduce<decode_block_size, 0>(warp_null_count);
-    if (t == 0) { ni.null_count += block_null_count; }
+    if (t == 0) { ni.null_count += block_value_count - block_valid_count; }
 
     // output offset
     if (is_valid) {
@@ -620,6 +659,45 @@ __device__ int update_validity_and_rows_indices_non_nullable(int32_t target_valu
   }
 
   return valid_count;
+}
+
+/**
+ * @brief Skip validity and row indices for non-nullable flat types
+ *
+ * @tparam decode_block_size Size of the thread block
+ * @tparam state_buf State buffer type (inferred)
+ *
+ * @param target_value_count The target value count to process
+ * @param s Pointer to  page state
+ * @param sb Pointer to  state buffer
+ * @param t Thread index
+ *
+ * @return Number of valid values processed
+ */
+template <int decode_block_size, typename state_buf>
+__device__ int skip_validity_and_rows_indices_non_nullable(int32_t target_value_count,
+                                                             page_state_s* s,
+                                                             state_buf* sb,
+                                                             int t)
+{
+  // cap by last row so that we don't process any rows past what we want to output.
+  int const first_row                 = s->first_row;
+  int const last_row                  = first_row + s->num_rows;
+  int const capped_target_value_count = min(target_value_count, last_row);
+
+  int const max_depth = s->col.max_nesting_depth - 1;
+  auto& ni            = s->nesting_info[max_depth];
+
+  if (t == 0) {
+    // update valid value count for decoding and total # of values we've processed
+    ni.valid_count       = capped_target_value_count;
+    ni.value_count       = capped_target_value_count;
+    s->nz_count          = capped_target_value_count;
+    s->input_value_count = capped_target_value_count;
+    s->input_row_count   = capped_target_value_count;
+  }
+
+  return capped_target_value_count;
 }
 
 /**
@@ -1158,6 +1236,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
 
   // Skip ahead in the decoding so that we don't repeat work (skipped_leaf_values = 0 for non-lists)
   auto const skipped_leaf_values = s->page.skipped_leaf_values;
+  int const first_row = s->first_row;
   if constexpr (has_lists_t) {
     if (skipped_leaf_values > 0) {
       if (should_process_nulls) {
@@ -1168,16 +1247,66 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
         skip_decode<rolling_buf_size>(dict_stream, skipped_leaf_values, t);
       } else if constexpr (has_strings_t) {
         initialize_string_descriptors<is_calc_sizes_only::YES>(s, sb, skipped_leaf_values, block);
-        if (t == 0) { s->dict_pos = processed_count; }
+        if (t == 0) { s->dict_pos = skipped_leaf_values; }
+        block.sync();
+      } else if constexpr (has_bools_t) {
+        if (bools_are_rle_stream) {
+          skip_decode<rolling_buf_size>(bool_stream, skipped_leaf_values, t);
+        } else {
+          if (t == 0) { s->dict_pos = skipped_leaf_values; }
+        }
         block.sync();
       }
+    }
+  } else {
+    if (first_row > 0) {
+      if (!should_process_nulls) {
+        processed_count = first_row;
+        valid_count = first_row;
+      } else {
+        while (processed_count < first_row) {
+          //TODO: Count while decoding instead of it being separate functions
+          auto to_process = min(rolling_buf_size, first_row - processed_count);          
+          int next_processed_count = processed_count + def_decoder.decode_next(t, to_process);
+
+          int num_valids = skip_validity_and_row_indices_nonlist<decode_block_size_t, level_t, has_nesting_t, rolling_buf_size>(
+            processed_count, next_processed_count, s, def, t);
+
+          valid_count += num_valids;
+          processed_count = next_processed_count;
+        }
+      }
+      if constexpr (has_dict_t) {
+        skip_decode<rolling_buf_size>(dict_stream, valid_count, t);
+      } else if constexpr (has_strings_t) {
+        initialize_string_descriptors<is_calc_sizes_only::YES>(s, sb, valid_count, block);
+        if (t == 0) { s->dict_pos = valid_count; }
+      } else if constexpr (has_bools_t) {
+        if (bools_are_rle_stream) {
+          skip_decode<rolling_buf_size>(bool_stream, valid_count, t);
+        } else {
+          if (t == 0) { s->dict_pos = valid_count; }
+        }
+      }
+      if (t == 0) {
+        int const max_depth = s->col.max_nesting_depth - 1;
+        auto& ni            = s->nesting_info[max_depth];
+
+        // update valid value count for decoding and total # of values we've processed
+        ni.valid_count       = valid_count;
+        ni.value_count       = processed_count;
+        s->nz_count          = valid_count;
+        s->input_value_count = processed_count;
+        s->input_row_count   = processed_count;
+      }
+      block.sync();
     }
   }
 
   // the core loop. decode batches of level stream data using rle_stream objects
   // and pass the results to decode_values
   // For chunked reads we may not process all of the rows on the page; if not stop early
-  int const last_row = s->first_row + s->num_rows;
+  int const last_row = first_row + s->num_rows;
   while ((s->error == 0) && (processed_count < s->page.num_input_values) &&
          (s->input_row_count <= last_row)) {
     int next_valid_count;
