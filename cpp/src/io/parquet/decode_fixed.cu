@@ -549,14 +549,14 @@ __device__ int update_validity_and_row_indices_flat(
     // at the first value, even if that is before first_row, because we cannot trivially jump to
     // the correct position to start reading. since we are about to write the validity vector
     // here we need to adjust our computed mask to take into account the write row bounds.
-    bool const in_write_row_bounds     = in_row_bounds && (row_index >= first_row);
+    bool const in_write_row_bounds     = in_row_bounds;
     int const in_write_row_bounds_mask = ballot(in_write_row_bounds);
     int const write_start = __ffs(in_write_row_bounds_mask) - 1;  // first bit in the warp to store
     // lane 0 from each warp writes out validity
     if ((write_start >= 0) && ((t % cudf::detail::warp_size) == 0)) {
       int const vindex     = value_count + thread_value_count;  // absolute input value index
       int const bit_offset = (valid_map_offset + vindex + write_start) -
-                             first_row;  // absolute bit offset into the output validity map
+                            first_row;  // absolute bit offset into the output validity map
       int const write_end =
         cudf::detail::warp_size - __clz(in_write_row_bounds_mask);  // last bit in the warp to store
       int const bit_count = write_end - write_start;
@@ -1365,20 +1365,22 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   // and pass the results to decode_values
   // For chunked reads we may not process all of the rows on the page; if not stop early
   int const last_row = first_row + s->num_rows;
+  int to_process = rolling_buf_size;//has_lists_t ? rolling_buf_size : rolling_buf_size - init_valid_map_offset;
   while ((s->error == 0) && (processed_count < s->page.num_input_values) &&
          (s->input_row_count <= last_row)) {
     int next_valid_count;
 
     // only need to process definition levels if this is a nullable column
     if constexpr (process_nulls_t) {
-      processed_count += def_decoder.decode_next(t);
+      processed_count += def_decoder.decode_next(t, to_process);
+      to_process = rolling_buf_size;
       block.sync();
 
       if constexpr (has_lists_t) {
         rep_decoder.decode_next(t);
         block.sync();
         next_valid_count =
-          update_validity_and_row_indices_lists<decode_block_size_t, true, level_t>(
+          update_validity_and_row_indices_lists<decode_block_size_t, process_nulls_t, level_t>(
             processed_count, s, sb, def, rep, t);
       } else if constexpr (has_nesting_t) {
         next_valid_count = update_validity_and_row_indices_nested<decode_block_size_t, level_t>(
@@ -1396,7 +1398,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
         processed_count += rep_decoder.decode_next(t);
         block.sync();
         next_valid_count =
-          update_validity_and_row_indices_lists<decode_block_size_t, false, level_t>(
+          update_validity_and_row_indices_lists<decode_block_size_t, process_nulls_t, level_t>(
             processed_count, s, sb, nullptr, rep, t);
       } else {
         // direct copy: no nulls, no lists, no need to update validity or row indices
