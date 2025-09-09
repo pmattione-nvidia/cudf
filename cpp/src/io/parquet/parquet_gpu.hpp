@@ -196,6 +196,15 @@ enum level_type {
 };
 
 /**
+ * @brief Enum for null status of a page
+ */
+enum class null_state {
+  ALL_NULLS = 0,  // Page contains only null values
+  NO_NULLS,       // Page contains no null values
+  MAYBE_NULLS     // Page may contain null values (mixed)
+};
+
+/**
  * @brief Enum of mask bits for the PageInfo kernel_mask
  *
  * Used to control which decode kernels to run.
@@ -381,6 +390,8 @@ struct PageInfo {
   // str_bytes from page index. because str_bytes needs to be reset each iteration
   // while doing chunked reads, persist the value from the page index here.
   int32_t str_bytes_from_index;
+
+  null_state page_null_state;  // null state of this page (ALL_NULLS, NO_NULLS, MAYBE_NULLS)
 };
 
 // forward declaration
@@ -926,7 +937,7 @@ void decode_delta_length_byte_array(cudf::detail::hostdevice_span<PageInfo> page
                                     rmm::cuda_stream_view stream);
 
 /**
- * @brief Launches kernel for reading non-dictionary fixed width column data stored in the pages
+ * @brief Launches kernel for reading fixed width column data stored in the pages
  *
  * The page data will be written to the output pointed to in the page's
  * associated column chunk.
@@ -942,16 +953,29 @@ void decode_delta_length_byte_array(cudf::detail::hostdevice_span<PageInfo> page
  * @param[out] error_code Error code for kernel failures
  * @param[in] stream CUDA stream to use
  */
-void decode_page_data(cudf::detail::hostdevice_span<PageInfo> pages,
-                      cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
-                      size_t num_rows,
-                      size_t min_row,
-                      int level_type_size,
-                      decode_kernel_mask kernel_mask,
-                      cudf::device_span<bool const> page_mask,
-                      cudf::device_span<size_t> initial_str_offsets,
-                      kernel_error::pointer error_code,
-                      rmm::cuda_stream_view stream);
+void decode_page_data_generic(cudf::detail::hostdevice_span<PageInfo> pages,
+                              cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+                              size_t num_rows,
+                              size_t min_row,
+                              int level_type_size,
+                              decode_kernel_mask kernel_mask,
+                              cudf::device_span<bool const> page_mask,
+                              cudf::device_span<size_t> initial_str_offsets,
+                              kernel_error::pointer error_code,
+                              rmm::cuda_stream_view stream);
+
+/**
+ * @brief Launches kernel for determining the null state of each page
+ *
+ * @param[in,out] pages All pages to be decoded
+ * @param[in] chunks All chunks to be decoded
+ * @param[in] page_mask Boolean vector indicating which pages need to be decoded
+ * @param[in] stream CUDA stream to use
+ */
+void decode_page_null_states(cudf::detail::hostdevice_span<PageInfo> pages,
+                             cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+                             cudf::device_span<bool const> page_mask,
+                             rmm::cuda_stream_view stream);
 
 /**
  * @brief Launches kernel for initializing encoder row group fragments
