@@ -91,7 +91,7 @@ __device__ static void scan_block_exclusive_sum(
   }
 }
 
-template <int block_size, bool has_lists_t, typename state_buf>
+template <int block_size, bool has_lists_t, bool has_dict_t, typename state_buf>
 __device__ void decode_fixed_width_values(
   page_state_s* s, state_buf* const sb, int start, int end, int t)
 {
@@ -108,11 +108,8 @@ __device__ void decode_fixed_width_values(
   int const skipped_leaf_values = s->page.skipped_leaf_values;
 
   // decode values
-  int pos = start;
-  while (pos < end) {
-    int const batch_size = min(max_batch_size, end - pos);
-    int const target_pos = pos + batch_size;
-    int const thread_pos = pos + t;
+  int thread_pos = start + t;
+  while (thread_pos < end) {
 
     // Index from value buffer (doesn't include nulls) to final array (has gaps for nulls)
     int const dst_pos = [&]() {
@@ -121,9 +118,8 @@ __device__ void decode_fixed_width_values(
       return dst_pos;
     }();
 
-    // target_pos will always be properly bounded by num_rows, but dst_pos may be negative (values
-    // before first_row) in the flat hierarchy case.
-    if (thread_pos < target_pos && dst_pos >= 0) {
+    // dst_pos may be negative (values before first_row) for non-lists.
+    if (dst_pos >= 0) {
       // nesting level that is storing actual leaf values
 
       // src_pos represents the logical row position we want to read from. But in the case of
@@ -140,10 +136,10 @@ __device__ void decode_fixed_width_values(
       if (s->col.logical_type.has_value() && s->col.logical_type->type == LogicalType::DECIMAL) {
         switch (dtype) {
           case Type::INT32:
-            read_fixed_width_value_fast(s, sb, src_pos, static_cast<uint32_t*>(dst));
+            read_fixed_width_value_fast_t<has_dict_t>(s, sb, src_pos, static_cast<uint32_t*>(dst));
             break;
           case Type::INT64:
-            read_fixed_width_value_fast(s, sb, src_pos, static_cast<uint2*>(dst));
+            read_fixed_width_value_fast_t<has_dict_t>(s, sb, src_pos, static_cast<uint2*>(dst));
             break;
           default:
             if (s->dtype_len_in <= sizeof(int32_t)) {
@@ -165,22 +161,22 @@ __device__ void decode_fixed_width_values(
           // TIME_MILLIS is the only duration type stored as int32:
           // https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#deprecated-time-convertedtype
           auto const dst_ptr = static_cast<uint32_t*>(dst);
-          read_fixed_width_value_fast(s, sb, src_pos, dst_ptr);
+          read_fixed_width_value_fast_t<has_dict_t>(s, sb, src_pos, dst_ptr);
           // zero out most significant bytes
           cuda::std::memset(dst_ptr + 1, 0, sizeof(int32_t));
         } else if (s->ts_scale) {
           read_int64_timestamp(s, sb, src_pos, static_cast<int64_t*>(dst));
         } else {
-          read_fixed_width_value_fast(s, sb, src_pos, static_cast<uint2*>(dst));
+          read_fixed_width_value_fast_t<has_dict_t>(s, sb, src_pos, static_cast<uint2*>(dst));
         }
       } else if (dtype_len == 4) {
-        read_fixed_width_value_fast(s, sb, src_pos, static_cast<uint32_t*>(dst));
+        read_fixed_width_value_fast_t<has_dict_t>(s, sb, src_pos, static_cast<uint32_t*>(dst));
       } else {
         read_nbyte_fixed_width_value(s, sb, src_pos, static_cast<uint8_t*>(dst), dtype_len);
       }
     }
 
-    pos += batch_size;
+    thread_pos += max_batch_size;
   }
 }
 
@@ -203,12 +199,8 @@ __device__ inline void decode_fixed_width_split_values(
   int const skipped_leaf_values = s->page.skipped_leaf_values;
 
   // decode values
-  int pos = start;
-  while (pos < end) {
-    int const batch_size = min(max_batch_size, end - pos);
-
-    int const target_pos = pos + batch_size;
-    int const thread_pos = pos + t;
+  int thread_pos = start + t;
+  while (thread_pos < end) {
 
     // the position in the output column/buffer
     // Index from value buffer (doesn't include nulls) to final array (has gaps for nulls)
@@ -218,9 +210,8 @@ __device__ inline void decode_fixed_width_split_values(
       return dst_pos;
     }();
 
-    // target_pos will always be properly bounded by num_rows, but dst_pos may be negative (values
-    // before first_row) in the flat hierarchy case.
-    if (thread_pos < target_pos && dst_pos >= 0) {
+    // dst_pos may be negative (values before first_row) for non-lists.
+    if (dst_pos >= 0) {
       // src_pos represents the logical row position we want to read from. But in the case of
       // nested hierarchies (lists), there is no 1:1 mapping of rows to values. So src_pos
       // has to take into account the # of values we have to skip in the page to get to the
@@ -284,7 +275,7 @@ __device__ inline void decode_fixed_width_split_values(
       }
     }
 
-    pos += batch_size;
+    thread_pos += max_batch_size;
   }
 }
 
@@ -1249,7 +1240,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
       decode_fixed_width_split_values<decode_block_size_t, has_lists_t>(
         s, sb, valid_count, next_valid_count, t);
     } else {
-      decode_fixed_width_values<decode_block_size_t, has_lists_t>(
+      decode_fixed_width_values<decode_block_size_t, has_lists_t, has_dict_t>(
         s, sb, valid_count, next_valid_count, t);
     }
     block.sync();

@@ -75,20 +75,9 @@ inline __device__ void gpuStoreOutput(uint32_t* dst,
                                       uint32_t dict_pos,
                                       uint32_t dict_size)
 {
-  uint32_t bytebuf;
-  unsigned int ofs = 3 & reinterpret_cast<size_t>(src8);
-  src8 -= ofs;  // align to 32-bit boundary
-  ofs <<= 3;    // bytes -> bits
   if (dict_pos < dict_size) {
-    bytebuf = *reinterpret_cast<uint32_t const*>(src8 + dict_pos);
-    if (ofs) {
-      uint32_t bytebufnext = *reinterpret_cast<uint32_t const*>(src8 + dict_pos + 4);
-      bytebuf              = __funnelshift_r(bytebuf, bytebufnext, ofs);
-    }
-  } else {
-    bytebuf = 0;
+    memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<void const*>(src8 + dict_pos), 4);
   }
-  *dst = bytebuf;
 }
 
 /**
@@ -104,22 +93,9 @@ inline __device__ void gpuStoreOutput(uint2* dst,
                                       uint32_t dict_pos,
                                       uint32_t dict_size)
 {
-  uint2 v;
-  unsigned int ofs = 3 & reinterpret_cast<size_t>(src8);
-  src8 -= ofs;  // align to 32-bit boundary
-  ofs <<= 3;    // bytes -> bits
   if (dict_pos < dict_size) {
-    v.x = *reinterpret_cast<uint32_t const*>(src8 + dict_pos + 0);
-    v.y = *reinterpret_cast<uint32_t const*>(src8 + dict_pos + 4);
-    if (ofs) {
-      uint32_t next = *reinterpret_cast<uint32_t const*>(src8 + dict_pos + 8);
-      v.x           = __funnelshift_r(v.x, v.y, ofs);
-      v.y           = __funnelshift_r(v.y, next, ofs);
-    }
-  } else {
-    v.x = v.y = 0;
+    memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<void const*>(src8 + dict_pos), 8);
   }
-  *dst = v;
 }
 
 /**
@@ -335,6 +311,37 @@ inline __device__ void read_fixed_width_value_fast(page_state_s* s,
   uint32_t dict_pos, dict_size = s->dict_size;
 
   if (s->dict_base) {
+    // Dictionary
+    dict_pos =
+      (s->dict_bits > 0) ? sb->dict_idx[rolling_index<state_buf::dict_buf_size>(src_pos)] : 0;
+    dict = s->dict_base;
+  } else {
+    // Plain
+    dict_pos = src_pos;
+    dict     = s->data_start;
+  }
+  dict_pos *= (uint32_t)s->dtype_len_in;
+  gpuStoreOutput(dst, dict, dict_pos, dict_size);
+}
+
+/**
+ * @brief Output a small fixed-length value
+ *
+ * @param[in,out] s Page state input/output
+ * @param[out] sb Page state buffer output
+ * @param[in] src_pos Source position
+ * @param[in] dst Pointer to row output data
+ */
+template <bool has_dict_t, typename T, typename state_buf>
+inline __device__ void read_fixed_width_value_fast_t(page_state_s* s,
+                                                   state_buf* sb,
+                                                   int src_pos,
+                                                   T* dst)
+{
+  uint8_t const* dict;
+  uint32_t dict_pos, dict_size = s->dict_size;
+
+  if constexpr (has_dict_t) {
     // Dictionary
     dict_pos =
       (s->dict_bits > 0) ? sb->dict_idx[rolling_index<state_buf::dict_buf_size>(src_pos)] : 0;
