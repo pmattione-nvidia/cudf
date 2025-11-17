@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "delta_binary.cuh"
@@ -343,11 +332,12 @@ CUDF_KERNEL void __launch_bounds__(decode_delta_binary_block_size)
   bool const has_repetition = s->col.max_level[level_type::REPETITION] > 0;
   // Write list offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
-    auto& page      = pages[page_idx];
-    page.num_nulls  = page.num_rows;
-    page.num_valids = 0;
+    auto& page = pages[page_idx];
     // Update offsets for all list depth levels
     if (has_repetition) { update_list_offsets_for_pruned_pages<decode_delta_binary_block_size>(s); }
+    page.num_nulls = page.nesting[s->col.max_nesting_depth - 1].batch_size;
+    page.num_nulls -= has_repetition ? 0 : s->first_row;
+    page.num_valids = 0;
     return;
   }
 
@@ -492,10 +482,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // Write list/string offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
-    auto page        = &pages[page_idx];
-    page->num_nulls  = page->num_rows;
-    page->num_valids = 0;
-
+    auto page = &pages[page_idx];
     // Update list offsets and string offsets or sizes depending on the large-string property
     if (has_repetition) {
       // Update list offsets
@@ -508,6 +495,9 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       update_string_offsets_for_pruned_pages<decode_block_size, false>(
         s, initial_str_offsets, pages[page_idx]);
     }
+    page->num_nulls = page->nesting[s->col.max_nesting_depth - 1].batch_size;
+    page->num_nulls -= has_repetition ? 0 : s->first_row;
+    page->num_valids = 0;
 
     return;
   }
@@ -702,10 +692,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // Write list/string offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
-    auto page        = &pages[page_idx];
-    page->num_nulls  = page->num_rows;
-    page->num_valids = 0;
-
+    auto page = &pages[page_idx];
     // Update list offsets and string offsets or sizes depending on the large-string property
     if (has_repetition) {
       // Update list offsets
@@ -718,6 +705,9 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       update_string_offsets_for_pruned_pages<decode_block_size, false>(
         s, initial_str_offsets, pages[page_idx]);
     }
+    page->num_nulls = page->nesting[s->col.max_nesting_depth - 1].batch_size;
+    page->num_nulls -= has_repetition ? 0 : s->first_row;
+    page->num_valids = 0;
 
     return;
   }
@@ -856,7 +846,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   // finally, copy the string data into place
   auto const dst = nesting_info_base[leaf_level_index].string_out;
   auto const src = page_string_data + string_offset;
-  memcpy_block<decode_block_size, true>(dst, src, s->page.str_bytes, block.thread_rank());
+  memcpy_block<decode_block_size, true>(dst, src, s->page.str_bytes, block);
 
   if (block.thread_rank() == 0 and s->error != 0) { set_error(s->error, error_code); }
 }

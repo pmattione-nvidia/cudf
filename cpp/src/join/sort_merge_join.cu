@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <cudf/column/column_device_view.cuh>
@@ -19,11 +8,11 @@
 #include <cudf/copying.hpp>
 #include <cudf/detail/null_mask.cuh>
 #include <cudf/detail/nvtx/ranges.hpp>
+#include <cudf/detail/row_operator/lexicographic.cuh>
 #include <cudf/join/sort_merge_join.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/stream_compaction.hpp>
-#include <cudf/table/experimental/row_operators.cuh>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
@@ -106,9 +95,9 @@ class merge {
     __device__ bool operator()(size_type lhs_index, size_type rhs_index) const noexcept
     {
       if (*_d_ptr == bound_type::UPPER) {
-        return ub_comparator(lhs_index, rhs_index) == weak_ordering::LESS;
+        return ub_comparator(lhs_index, rhs_index) == cudf::detail::weak_ordering::LESS;
       }
-      return lb_comparator(lhs_index, rhs_index) == weak_ordering::LESS;
+      return lb_comparator(lhs_index, rhs_index) == cudf::detail::weak_ordering::LESS;
     }
 
     bound_type* _d_ptr;
@@ -118,8 +107,8 @@ class merge {
     table_device_view _rhs;
     device_span<detail::dremel_device_view const> _lhs_dremel;
     device_span<detail::dremel_device_view const> _rhs_dremel;
-    cudf::experimental::row::lexicographic::device_row_comparator<true, bool> ub_comparator;
-    cudf::experimental::row::lexicographic::device_row_comparator<true, bool> lb_comparator;
+    cudf::detail::row::lexicographic::device_row_comparator<true, bool> ub_comparator;
+    cudf::detail::row::lexicographic::device_row_comparator<true, bool> lb_comparator;
   };
 
   merge(table_view const& smaller,

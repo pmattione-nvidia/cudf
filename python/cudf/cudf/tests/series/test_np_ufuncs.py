@@ -1,5 +1,6 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
-
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
+import datetime
 import operator
 from functools import reduce
 
@@ -60,10 +61,11 @@ def test_ufunc_series(request, numpy_ufunc, has_nulls, indexed):
     # Avoid zeros in either array to skip division by 0 errors. Also limit the
     # scale to avoid issues with overflow, etc. We use ints because some
     # operations (like bitwise ops) are not defined for floats.
+    rng = np.random.default_rng(0)
     pandas_args = args = [
         cudf.Series(
-            cp.random.randint(low=1, high=10, size=N),
-            index=cp.random.choice(range(N), N, False) if indexed else None,
+            rng.integers(low=1, high=10, size=N),
+            index=rng.choice(range(N), N, False) if indexed else None,
         )
         for _ in range(numpy_ufunc.nin)
     ]
@@ -157,10 +159,11 @@ def test_binary_ufunc_series_array(
     # Avoid zeros in either array to skip division by 0 errors. Also limit the
     # scale to avoid issues with overflow, etc. We use ints because some
     # operations (like bitwise ops) are not defined for floats.
+    rng = np.random.default_rng(0)
     args = [
         cudf.Series(
-            cp.random.rand(N),
-            index=cp.random.choice(range(N), N, False) if indexed else None,
+            rng.random(N),
+            index=rng.choice(range(N), N, False) if indexed else None,
         )
         for _ in range(ufunc.nin)
     ]
@@ -208,3 +211,49 @@ def test_ufunc_cudf_series_error_with_out_kwarg():
     cudf_s3 = cudf.Series(data=[0, 0, 0, 0])
     with pytest.raises(TypeError):
         np.add(x1=cudf_s1, x2=cudf_s2, out=cudf_s3)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [1000000, 200000, 3000000],
+        [1000000, 200000, None],
+        [],
+        [None],
+        [None, None, None, None, None],
+        [12, 12, 22, 343, 4353534, 435342],
+        np.array([10, 20, 30, None, 100]),
+        cp.asarray([10, 20, 30, 100]),
+        [1000000, 200000, 3000000],
+        [1000000, 200000, None],
+        [1],
+        [12, 11, 232, 223432411, 2343241, 234324, 23234],
+        [12, 11, 2.32, 2234.32411, 2343.241, 23432.4, 23234],
+        [1.321, 1132.324, 23223231.11, 233.41, 0.2434, 332, 323],
+        [12, 11, 2.32, 2234.32411, 2343.241, 23432.4, 23234],
+    ],
+)
+@pytest.mark.parametrize(
+    "scalar",
+    [
+        datetime.timedelta(days=768),
+        datetime.timedelta(seconds=768),
+        datetime.timedelta(microseconds=7),
+        np.timedelta64("nat"),
+        np.timedelta64(1, "s"),
+        np.timedelta64(1, "ms"),
+        np.timedelta64(1, "us"),
+        np.timedelta64(1, "ns"),
+    ],
+)
+@pytest.mark.parametrize("op", [np.add, np.subtract])
+def test_datetime_series_ops_with_scalars_misc(
+    data, scalar, datetime_types_as_str, op
+):
+    gsr = cudf.Series(data=data, dtype=datetime_types_as_str)
+    psr = gsr.to_pandas()
+
+    expect = op(psr, scalar)
+    got = op(gsr, scalar)
+
+    assert_eq(expect, got)

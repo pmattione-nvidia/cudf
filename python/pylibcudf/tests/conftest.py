@@ -1,4 +1,5 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 # Tell ruff it's OK that some imports occur after the sys.path.insert
 # ruff: noqa: E402
 import io
@@ -145,9 +146,13 @@ def _generate_table_data(types, nrows, seed=42):
 
     pa_table = pa.Table.from_pydict(table_dict)
 
-    return plc.io.TableWithMetadata(
+    # TODO: Once interop APIs support a stream we should pass one and synchronize on it
+    # to avoid syncing the default stream here.
+    plc_table = plc.io.TableWithMetadata(
         plc.Table.from_arrow(pa_table), column_names=colnames
-    ), pa_table
+    )
+    plc.utils.DEFAULT_STREAM.synchronize()
+    return plc_table, pa_table
 
 
 @pytest.fixture(scope="session", params=[0, 100])
