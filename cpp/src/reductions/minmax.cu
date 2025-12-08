@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <cudf/column/column_device_view.cuh>
@@ -32,10 +21,10 @@
 
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
+#include <cuda/std/utility>
 #include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
-#include <thrust/pair.h>
 #include <thrust/transform_reduce.h>
 
 #include <type_traits>
@@ -126,13 +115,13 @@ struct create_minmax {
 };
 
 /**
- * @brief Functor that takes a thrust::pair<T, bool> and produces a minmax_pair
+ * @brief Functor that takes a cuda::std::pair<T, bool> and produces a minmax_pair
  * that is <T, T> for minimum and maximum or <cudf::DeviceMin::identity<T>(),
  * cudf::DeviceMax::identity<T>()>
  */
 template <typename T>
 struct create_minmax_with_nulls {
-  __device__ minmax_pair<T> operator()(thrust::pair<T, bool> i)
+  __device__ minmax_pair<T> operator()(cuda::std::pair<T, bool> i)
   {
     return i.second ? minmax_pair<T>{i.first} : minmax_pair<T>{};
   }

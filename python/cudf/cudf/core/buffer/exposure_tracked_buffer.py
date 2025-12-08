@@ -1,4 +1,5 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -98,6 +99,7 @@ class ExposureTrackedBuffer(Buffer):
         if len(self.owner._slices) > 1:
             # If this is not the only slice pointing to `self.owner`, we
             # point to a new copy of our slice of `self.owner`.
+            self.owner._slices.remove(self)
             t = self.copy(deep=True)
             self._owner = t.owner
             self._offset = t._offset

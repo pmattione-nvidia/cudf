@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "quantiles/tdigest/tdigest_util.cuh"
@@ -28,7 +17,6 @@
 #include <cudf/detail/sorting.hpp>
 #include <cudf/detail/tdigest/tdigest.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/functional.hpp>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/fixed_point/conv.hpp>
 #include <cudf/lists/lists_column_view.hpp>
@@ -41,6 +29,8 @@
 
 #include <cuda/functional>
 #include <cuda/std/iterator>
+#include <cuda/std/span>
+#include <cuda/std/tuple>
 #include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/functional.h>
@@ -50,13 +40,11 @@
 #include <thrust/iterator/transform_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/merge.h>
-#include <thrust/pair.h>
 #include <thrust/reduce.h>
 #include <thrust/remove.h>
 #include <thrust/replace.h>
 #include <thrust/scan.h>
 #include <thrust/transform.h>
-#include <thrust/tuple.h>
 
 namespace cudf {
 namespace tdigest {
@@ -270,7 +258,8 @@ struct cumulative_centroid_weight {
   double const* cumulative_weights;  // cumulative weights of non-empty clusters
   GroupLabelsIter group_labels;      // group labels for each tdigest including empty ones
   GroupOffsetsIter group_offsets;    // groups
-  cudf::device_span<size_type const> tdigest_offsets;  // tdigests with a group
+  // Host-device span, as the offsets may reside in either device memory or pinned host memory
+  cuda::std::span<size_type const> tdigest_offsets;  // tdigests with a group
 
   /**
    * @brief Returns the cumulative weight for a given value index. The index `n` is the index of
@@ -1049,7 +1038,7 @@ std::unique_ptr<column> compute_tdigests(int delta,
   cudf::mutable_column_view weight_col(*centroid_weights);
 
   // reduce the centroids into the clusters
-  auto output = thrust::make_zip_iterator(thrust::make_tuple(
+  auto output = thrust::make_zip_iterator(cuda::std::make_tuple(
     mean_col.begin<double>(), weight_col.begin<double>(), thrust::make_discard_iterator()));
 
   auto const num_values = std::distance(centroids_begin, centroids_end);
@@ -1455,7 +1444,7 @@ std::unique_ptr<column> merge_tdigests(tdigest_column_view const& tdv,
                         thrust::make_discard_iterator(),
                         merged_min_col->mutable_view().begin<double>(),
                         cuda::std::equal_to{},  // key equality check
-                        cudf::detail::minimum{});
+                        cuda::minimum{});
 
   auto merged_max_col = cudf::make_numeric_column(
     data_type{type_id::FLOAT64}, num_groups, mask_state::UNALLOCATED, stream, mr);
@@ -1470,7 +1459,7 @@ std::unique_ptr<column> merge_tdigests(tdigest_column_view const& tdv,
                         thrust::make_discard_iterator(),
                         merged_max_col->mutable_view().begin<double>(),
                         cuda::std::equal_to{},  // key equality check
-                        cudf::detail::maximum{});
+                        cuda::maximum{});
 
   auto tdigest_offsets = tdv.centroids().offsets();
 
@@ -1563,7 +1552,10 @@ std::unique_ptr<column> merge_tdigests(tdigest_column_view const& tdv,
         centroid_group_info{
           p_cumulative_weights.begin(), p_group_offsets, p_tdigest_offsets.begin()},
         cumulative_centroid_weight{
-          p_cumulative_weights.begin(), p_group_labels, p_group_offsets, p_tdigest_offsets},
+          p_cumulative_weights.begin(),
+          p_group_labels,
+          p_group_offsets,
+          cuda::std::span<size_type const>{p_tdigest_offsets.begin(), p_tdigest_offsets.size()}},
         has_nulls,
         stream,
         mr);
@@ -1581,7 +1573,8 @@ std::unique_ptr<column> merge_tdigests(tdigest_column_view const& tdv,
         cumulative_weights.begin(),
         group_labels,
         group_offsets,
-        {tdigest_offsets.begin<size_type>(), static_cast<size_t>(tdigest_offsets.size())}},
+        cuda::std::span<size_type const>{tdigest_offsets.begin<size_type>(),
+                                         static_cast<size_t>(tdigest_offsets.size())}},
       has_nulls,
       stream,
       mr);
@@ -1592,20 +1585,22 @@ std::unique_ptr<column> merge_tdigests(tdigest_column_view const& tdv,
     0, make_weighted_centroid{merged_means.begin(), merged_weights.begin()});
 
   // compute the tdigest
-  return compute_tdigests(delta,
-                          centroids,
-                          centroids + merged_means.size(),
-                          cumulative_centroid_weight{cumulative_weights.begin(),
-                                                     group_labels,
-                                                     group_offsets,
-                                                     {tdigest_offsets.begin<size_type>(),
-                                                      static_cast<size_t>(tdigest_offsets.size())}},
-                          std::move(merged_min_col),
-                          std::move(merged_max_col),
-                          cinfo,
-                          has_nulls,
-                          stream,
-                          mr);
+  return compute_tdigests(
+    delta,
+    centroids,
+    centroids + merged_means.size(),
+    cumulative_centroid_weight{
+      cumulative_weights.begin(),
+      group_labels,
+      group_offsets,
+      cuda::std::span<size_type const>{tdigest_offsets.begin<size_type>(),
+                                       static_cast<size_t>(tdigest_offsets.size())}},
+    std::move(merged_min_col),
+    std::move(merged_max_col),
+    cinfo,
+    has_nulls,
+    stream,
+    mr);
 }
 
 }  // anonymous namespace

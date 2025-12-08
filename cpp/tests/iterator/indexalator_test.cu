@@ -1,16 +1,6 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software distributed under the License
- * is distributed on an "AS IS" BASIS,  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
- * or implied. See the License for the specific language governing permissions and limitations under
- * the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <tests/iterator/iterator_tests.cuh>
@@ -21,10 +11,10 @@
 #include <cudf/detail/indexalator.cuh>
 
 #include <cuda/std/optional>
+#include <cuda/std/utility>
 #include <thrust/binary_search.h>
 #include <thrust/gather.h>
 #include <thrust/host_vector.h>
-#include <thrust/pair.h>
 #include <thrust/scatter.h>
 #include <thrust/sequence.h>
 
@@ -63,12 +53,13 @@ TYPED_TEST(IndexalatorTest, pair_iterator)
     host_values.begin(), host_values.end(), validity.begin());
 
   auto expected_values =
-    thrust::host_vector<thrust::pair<cudf::size_type, bool>>(host_values.size());
-  std::transform(host_values.begin(),
-                 host_values.end(),
-                 validity.begin(),
-                 expected_values.begin(),
-                 [](T v, bool b) { return thrust::make_pair(static_cast<cudf::size_type>(v), b); });
+    thrust::host_vector<cuda::std::pair<cudf::size_type, bool>>(host_values.size());
+  std::transform(
+    host_values.begin(),
+    host_values.end(),
+    validity.begin(),
+    expected_values.begin(),
+    [](T v, bool b) { return cuda::std::make_pair(static_cast<cudf::size_type>(v), b); });
 
   auto it_dev = cudf::detail::indexalator_factory::make_input_pair_iterator(d_col);
   this->iterator_test_thrust(expected_values, it_dev, host_values.size());

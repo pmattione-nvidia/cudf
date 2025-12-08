@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <cudf/column/column_factories.hpp>
@@ -36,13 +25,13 @@
 
 #include <cuda/functional>
 #include <cuda/std/iterator>
+#include <cuda/std/utility>
 #include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/permutation_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
-#include <thrust/pair.h>
 #include <thrust/transform.h>
 #include <thrust/transform_scan.h>
 
@@ -60,7 +49,7 @@ namespace {
  * The first value is the keys offsets and the second values is the indices offsets.
  * These are offsets to the beginning of each input column after concatenating.
  */
-using offsets_pair = thrust::pair<size_type, size_type>;
+using offsets_pair = cuda::std::pair<size_type, size_type>;
 
 /**
  * @brief Utility for calculating the offsets for the concatenated child columns

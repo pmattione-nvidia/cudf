@@ -1,12 +1,14 @@
-# Copyright (c) 2018-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2018-2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 
+import io
 import pickle
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from cudf import DataFrame, Index, RangeIndex, Series
+from cudf import DataFrame, Index, RangeIndex, Series, date_range
 from cudf.core.buffer import as_buffer
 from cudf.testing import assert_eq
 
@@ -132,3 +134,38 @@ def test_pickle_string_column(slices):
     out = pickle.loads(pickled)
 
     assert_eq(Series._from_column(out), Series._from_column(input_col))
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["a", "b", "c"],
+        [None, None, None],
+        ["aa", "aa", "aa"],
+        ["bb", "aa", "aa"],
+        None,
+    ],
+)
+def test_pickle_roundtrip_multiindex(names):
+    df = DataFrame(
+        {
+            "one": [1, 2, 3],
+            "two": [True, False, True],
+            "three": ["ab", "cd", "ef"],
+            "four": [0.2, 0.1, -10.2],
+        }
+    )
+    expected_df = df.set_index(["one", "two", "three"])
+    expected_df.index.names = names
+    local_file = io.BytesIO()
+
+    pickle.dump(expected_df, local_file)
+    local_file.seek(0)
+    actual_df = pickle.load(local_file)
+    assert_eq(expected_df, actual_df)
+
+
+def test_pickle_dataframe_with_datetime_index():
+    idx = date_range(start="1/1/2018", end="1/08/2018")
+    df = DataFrame({"a": range(len(idx))}, index=idx)
+    assert_eq(df, pickle.loads(pickle.dumps(df)))

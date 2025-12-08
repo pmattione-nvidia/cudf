@@ -1,7 +1,9 @@
-# Copyright (c) 2019-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2019-2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
 import itertools
+import json
 import warnings
 from typing import TYPE_CHECKING, Literal
 
@@ -23,11 +25,6 @@ from cudf.core.index import CategoricalIndex, RangeIndex
 from cudf.core.multiindex import MultiIndex
 from cudf.utils import ioutils
 from cudf.utils.dtypes import cudf_dtype_from_pa_type, dtype_to_pylibcudf_type
-
-try:
-    import ujson as json  # type: ignore[import-untyped]
-except ImportError:
-    import json
 
 if TYPE_CHECKING:
     from cudf.core.column import ColumnBase
@@ -457,9 +454,7 @@ def _plc_write_orc(
             if table.index is None
             else itertools.chain(table.index._columns, table._columns)
         )
-        plc_table = plc.Table(
-            [col.to_pylibcudf(mode="read") for col in columns]
-        )
+        plc_table = plc.Table([col.plc_column for col in columns])
         tbl_meta = plc.io.types.TableInputMetadata(plc_table)
         for level, idx_name in enumerate(table._index.names):
             tbl_meta.column_metadata[level].set_name(
@@ -467,9 +462,7 @@ def _plc_write_orc(
             )
         num_index_cols_meta = table.index.nlevels
     else:
-        plc_table = plc.Table(
-            [col.to_pylibcudf(mode="read") for col in table._columns]
-        )
+        plc_table = plc.Table([col.plc_column for col in table._columns])
         tbl_meta = plc.io.types.TableInputMetadata(plc_table)
         num_index_cols_meta = 0
 
@@ -481,7 +474,8 @@ def _plc_write_orc(
     for i, (name, col) in enumerate(
         table._column_labels_and_values, start=num_index_cols_meta
     ):
-        tbl_meta.column_metadata[i].set_name(name)
+        # generate_pandas_metadata will reject tables with non-string column names
+        tbl_meta.column_metadata[i].set_name(name)  # type: ignore[arg-type]
         _set_col_children_metadata(
             col,
             tbl_meta.column_metadata[i],
@@ -567,9 +561,7 @@ class ORCWriter:
         else:
             cols_to_write = table._columns
 
-        self.writer.write(
-            plc.Table([col.to_pylibcudf(mode="read") for col in cols_to_write])
-        )
+        self.writer.write(plc.Table([col.plc_column for col in cols_to_write]))
 
     def close(self):
         if not self.initialized:
@@ -583,15 +575,13 @@ class ORCWriter:
         """
 
         num_index_cols_meta = 0
-        plc_table = plc.Table(
-            [col.to_pylibcudf(mode="read") for col in table._columns]
-        )
+        plc_table = plc.Table([col.plc_column for col in table._columns])
         self.tbl_meta = plc.io.types.TableInputMetadata(plc_table)
         if self.index is not False:
             if isinstance(table.index, MultiIndex):
                 plc_table = plc.Table(
                     [
-                        col.to_pylibcudf(mode="read")
+                        col.plc_column
                         for col in itertools.chain(
                             table.index._columns, table._columns
                         )
@@ -605,7 +595,7 @@ class ORCWriter:
                 if table.index.name is not None:
                     plc_table = plc.Table(
                         [
-                            col.to_pylibcudf(mode="read")
+                            col.plc_column
                             for col in itertools.chain(
                                 table.index._columns, table._columns
                             )
@@ -651,9 +641,9 @@ class ORCWriter:
 
 
 def _get_comp_type(
-    compression: Literal[False, None, "SNAPPY", "ZLIB", "ZSTD", "LZ4"],
+    compression: Literal[False, None, "SNAPPY", "ZLIB", "ZSTD", "LZ4", "NONE"],
 ) -> plc.io.types.CompressionType:
-    if compression is None or compression is False:
+    if compression is None or compression is False or compression == "NONE":
         return plc.io.types.CompressionType.NONE
 
     normed_compression = compression.upper()
@@ -709,3 +699,51 @@ def _set_col_children_metadata(
         )
     else:
         return
+
+
+def is_supported_read_orc(
+    compression: Literal["SNAPPY", "ZLIB", "ZSTD", "LZ4", "NONE"],
+) -> bool:
+    """Check if the compression type is supported for reading ORC files.
+
+    Parameters
+    ----------
+    compression : str
+        The compression type to check (e.g., "SNAPPY", "ZLIB", "LZ4")
+
+    Returns
+    -------
+    bool
+        True if the compression type is supported for reading ORC files
+
+    Examples
+    --------
+    >>> import cudf
+    >>> cudf.io.orc.is_supported_read_orc("LZ4")  # doctest: +SKIP
+    True
+    """
+    return plc.io.orc.is_supported_read_orc(_get_comp_type(compression))
+
+
+def is_supported_write_orc(
+    compression: Literal["SNAPPY", "ZLIB", "ZSTD", "LZ4", "NONE"],
+) -> bool:
+    """Check if the compression type is supported for writing ORC files.
+
+    Parameters
+    ----------
+    compression : str
+        The compression type to check (e.g., "SNAPPY", "ZLIB", "LZ4")
+
+    Returns
+    -------
+    bool
+        True if the compression type is supported for writing ORC files
+
+    Examples
+    --------
+    >>> import cudf
+    >>> cudf.io.orc.is_supported_write_orc("SNAPPY")  # doctest: +SKIP
+    True
+    """
+    return plc.io.orc.is_supported_write_orc(_get_comp_type(compression))

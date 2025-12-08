@@ -1,4 +1,5 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 
 from typing import Any
 
@@ -9,12 +10,17 @@ from pylibcudf.types import DataType
 
 NpGeneric = type[Any]
 
+PaScalar = type[Any]
+
 class Scalar:
     def __init__(self): ...
     def type(self) -> DataType: ...
-    def is_valid(self) -> bool: ...
+    def is_valid(self, stream: Stream) -> bool: ...
     @staticmethod
     def empty_like(column: Column, stream: Stream | None = None) -> Scalar: ...
+    def to_arrow(
+        self, metadata: list | str | None = None, stream: Stream | None = None
+    ) -> PaScalar: ...
     @staticmethod
     def from_arrow(
         pa_val: Any,
@@ -32,4 +38,6 @@ class Scalar:
     def from_numpy(
         cls, np_val: NpGeneric, stream: Stream | None = None
     ) -> Scalar: ...
-    def to_py(self) -> None | int | float | str | bool: ...
+    def to_py(
+        self, stream: Stream | None = None
+    ) -> None | int | float | str | bool: ...

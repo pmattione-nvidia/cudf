@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <cudf/column/column.hpp>
@@ -41,12 +30,12 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/tuple>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/transform.h>
-#include <thrust/tuple.h>
 
 namespace cudf {
 namespace detail {
@@ -127,18 +116,18 @@ std::unique_ptr<cudf::column> clamper(column_view const& input,
   auto output_device_view =
     cudf::mutable_column_device_view::create(output->mutable_view(), stream);
   auto input_device_view = cudf::column_device_view::create(input, stream);
-  auto scalar_zip_itr =
-    thrust::make_zip_iterator(thrust::make_tuple(lo_itr, lo_replace_itr, hi_itr, hi_replace_itr));
+  auto scalar_zip_itr    = thrust::make_zip_iterator(
+    cuda::std::make_tuple(lo_itr, lo_replace_itr, hi_itr, hi_replace_itr));
 
   auto trans =
     cuda::proclaim_return_type<T>([] __device__(auto element_optional, auto scalar_tuple) {
       if (element_optional.has_value()) {
-        auto lo_optional = thrust::get<0>(scalar_tuple);
-        auto hi_optional = thrust::get<2>(scalar_tuple);
+        auto lo_optional = cuda::std::get<0>(scalar_tuple);
+        auto hi_optional = cuda::std::get<2>(scalar_tuple);
         if (lo_optional.has_value() and (*element_optional < *lo_optional)) {
-          return *(thrust::get<1>(scalar_tuple));
+          return *(cuda::std::get<1>(scalar_tuple));
         } else if (hi_optional.has_value() and (*element_optional > *hi_optional)) {
-          return *(thrust::get<3>(scalar_tuple));
+          return *(cuda::std::get<3>(scalar_tuple));
         }
         return *element_optional;
       }

@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
 
@@ -36,7 +25,7 @@
 #include <optional>
 
 // Forward declaration
-namespace cudf::experimental::row::equality {
+namespace cudf::detail::row::equality {
 class preprocessed_table;
 }
 
@@ -93,7 +82,7 @@ struct hash_join {
                           cuda::thread_scope_device,
                           always_not_equal,
                           cuco::double_hashing<DEFAULT_JOIN_CG_SIZE, hasher1, hasher2>,
-                          cudf::detail::cuco_allocator<char>,
+                          rmm::mr::polymorphic_allocator<char>,
                           cuco::storage<2>>;
 
   hash_join()                            = delete;
@@ -108,7 +97,7 @@ struct hash_join {
   bool const _has_nulls;  ///< true if nulls are present in either build table or any probe table
   cudf::null_equality const _nulls_equal;  ///< whether to consider nulls as equal
   cudf::table_view _build;                 ///< input table to build the hash map
-  std::shared_ptr<cudf::experimental::row::equality::preprocessed_table>
+  std::shared_ptr<cudf::detail::row::equality::preprocessed_table>
     _preprocessed_build;     ///< input table preprocssed for row operators
   hash_table_t _hash_table;  ///< hash table built on `_build`
 

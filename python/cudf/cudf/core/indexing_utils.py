@@ -1,4 +1,5 @@
-# Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -127,6 +128,8 @@ def expand_key(
     if isinstance(key, tuple):
         # Key potentially indexes rows and columns, slice-expand to
         # shape of frame
+        if len(key) > 1 and sum(k is Ellipsis for k in key) > 1:
+            raise IndexError("indexer may only contain one '...' entry")
         indexers = key + (slice(None),) * (dim - len(key))
         if len(indexers) > dim:
             raise IndexError(
@@ -510,8 +513,8 @@ def ordered_find(needles: ColumnBase, haystack: ColumnBase) -> GatherMap:
     # the needle might appear multiple times in the haystack).
 
     left_rows, right_rows = plc.join.left_join(
-        plc.Table([needles.to_pylibcudf(mode="read")]),
-        plc.Table([haystack.to_pylibcudf(mode="read")]),
+        plc.Table([needles.plc_column]),
+        plc.Table([haystack.plc_column]),
         plc.types.NullEquality.EQUAL,
     )
     right_order = plc.copying.gather(

@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #pragma once
@@ -44,6 +33,12 @@ namespace CUDF_EXPORT cudf {
  */
 class sort_merge_join {
  public:
+  sort_merge_join()                                  = delete;
+  sort_merge_join(sort_merge_join const&)            = delete;
+  sort_merge_join(sort_merge_join&&)                 = delete;
+  sort_merge_join& operator=(sort_merge_join const&) = delete;
+  sort_merge_join& operator=(sort_merge_join&&)      = delete;
+
   /**
    * @brief Construct a sort-merge join object that pre-processes the right table
    * on creation, and can be used on subsequent join operations with multiple
@@ -260,12 +255,16 @@ class sort_merge_join {
    * @param right_view The preprocessed right table view
    * @param left_view The preprocessed left table view
    * @param op The merge operation functor to execute during the merge
+   * @param stream CUDA stream used for device memory operations and kernel launches
    *
    * @return The result of the merge operation as defined by the MergeOperation functor
    *         (typically pairs of join indices or match counts)
    */
   template <typename MergeOperation>
-  auto invoke_merge(table_view right_view, table_view left_view, MergeOperation&& op);
+  auto invoke_merge(table_view right_view,
+                    table_view left_view,
+                    MergeOperation&& op,
+                    rmm::cuda_stream_view stream);
 };
 
 /**
@@ -276,6 +275,9 @@ class sort_merge_join {
  * table that have a match in the right table (in unspecified order).
  * The corresponding values in the second returned vector are
  * the matched row indices from the right table.
+ *
+ * @deprecated Use the object-oriented sort_merge_join API `cudf::sort_merge_join::inner_join`
+ * instead
  *
  * @code{.pseudo}
  * Left: {{0, 1, 2}}
@@ -301,8 +303,8 @@ class sort_merge_join {
  * the result of performing an inner join between two tables with `left_keys` and `right_keys`
  * as the join keys .
  */
-std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
-          std::unique_ptr<rmm::device_uvector<size_type>>>
+[[deprecated]] std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
+                         std::unique_ptr<rmm::device_uvector<size_type>>>
 sort_merge_inner_join(cudf::table_view const& left_keys,
                       cudf::table_view const& right_keys,
                       null_equality compare_nulls       = null_equality::EQUAL,
@@ -319,6 +321,9 @@ sort_merge_inner_join(cudf::table_view const& left_keys,
  * The corresponding values in the second returned vector are
  * the matched row indices from the right table.
  *
+ * @deprecated Use the object-oriented sort_merge_join API `cudf::sort_merge_join::inner_join`
+ * instead
+ *
  * @code{.pseudo}
  * Left: {{0, 1, 2}}
  * Right: {{1, 2, 3}}
@@ -343,8 +348,8 @@ sort_merge_inner_join(cudf::table_view const& left_keys,
  * the result of performing an inner join between two tables with `left_keys` and `right_keys`
  * as the join keys .
  */
-std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
-          std::unique_ptr<rmm::device_uvector<size_type>>>
+[[deprecated]] std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
+                         std::unique_ptr<rmm::device_uvector<size_type>>>
 merge_inner_join(cudf::table_view const& left_keys,
                  cudf::table_view const& right_keys,
                  null_equality compare_nulls       = null_equality::EQUAL,

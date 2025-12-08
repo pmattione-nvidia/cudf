@@ -1,4 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
 import pandas as pd
@@ -67,7 +68,7 @@ def test_cumsum_decimal(dtype):
     pser = pd.Series(data, dtype="float64")
 
     got = gser.cumsum()
-    expected = cudf.Series.from_pandas(pser.cumsum()).astype(dtype)
+    expected = cudf.Series(pser.cumsum()).astype(dtype)
 
     assert_eq(got, expected)
 
@@ -88,7 +89,7 @@ def test_cummin_decimal(dtype):
     pser = pd.Series(data, dtype="float64")
 
     got = gser.cummin()
-    expected = cudf.Series.from_pandas(pser.cummin()).astype(dtype)
+    expected = cudf.Series(pser.cummin()).astype(dtype)
 
     assert_eq(got, expected)
 
@@ -109,7 +110,7 @@ def test_cummax_decimal(dtype):
     pser = pd.Series(data, dtype="float64")
 
     got = gser.cummax()
-    expected = cudf.Series.from_pandas(pser.cummax()).astype(dtype)
+    expected = cudf.Series(pser.cummax()).astype(dtype)
 
     assert_eq(got, expected)
 
@@ -122,3 +123,17 @@ def test_scan_boolean(method):
     expect = getattr(s.to_pandas(), method)()
 
     assert_eq(expect, got)
+
+
+def test_cummin_cummax_strings():
+    data = ["dog", "cat", "zebra", "ant", "bat"]
+    gser = cudf.Series(data)
+    pser = pd.Series(data)
+
+    got_min = gser.cummin()
+    expected_min = pser.cummin()
+    assert_eq(got_min, expected_min)
+
+    got_max = gser.cummax()
+    expected_max = pser.cummax()
+    assert_eq(got_max, expected_max)

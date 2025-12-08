@@ -1,17 +1,6 @@
 /*
- * Copyright (c) 2018-2025, NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2018-2025, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "page_data.cuh"
@@ -89,11 +78,14 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // Write list offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
-    auto& page      = pages[page_idx];
-    page.num_nulls  = page.num_rows;
-    page.num_valids = 0;
+    auto& page = pages[page_idx];
     // Update offsets for all list depth levels
     if (has_repetition) { update_list_offsets_for_pruned_pages<decode_block_size>(s); }
+
+    // Must be set after computing above list offsets
+    page.num_nulls = page.nesting[s->col.max_nesting_depth - 1].batch_size;
+    page.num_nulls -= has_repetition ? 0 : s->first_row;
+    page.num_valids = 0;
     return;
   }
 
@@ -221,12 +213,14 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   }
 
   // Zero-fill null positions after decoding valid values
-  int const leaf_level_index = s->col.max_nesting_depth - 1;
-  auto const& ni             = s->nesting_info[leaf_level_index];
-  if (ni.valid_map != nullptr) {
-    int const num_values = ni.valid_map_offset - init_valid_map_offset;
-    zero_fill_null_positions_shared<decode_block_size>(
-      s, s->dtype_len, init_valid_map_offset, num_values, static_cast<int>(block.thread_rank()));
+  if (has_repetition) {
+    int const leaf_level_index = s->col.max_nesting_depth - 1;
+    auto const& ni             = s->nesting_info[leaf_level_index];
+    if (ni.valid_map != nullptr) {
+      int const num_values = ni.valid_map_offset - init_valid_map_offset;
+      zero_fill_null_positions_shared<decode_block_size>(
+        s, s->dtype_len, init_valid_map_offset, num_values, static_cast<int>(block.thread_rank()));
+    }
   }
 
   if (block.thread_rank() == 0 and s->error != 0) { set_error(s->error, error_code); }
@@ -285,9 +279,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // Write list offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
-    auto& page      = pages[page_idx];
-    page.num_nulls  = page.num_rows;
-    page.num_valids = 0;
+    auto& page = pages[page_idx];
 
     // Update offsets for all list depth levels
     if (has_repetition) { update_list_offsets_for_pruned_pages<decode_block_size>(s); }
@@ -301,11 +293,13 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       s->col.logical_type.has_value() and s->col.logical_type->type == LogicalType::DECIMAL;
     if (dtype == Type::FIXED_LEN_BYTE_ARRAY or (dtype == Type::BYTE_ARRAY and not is_decimal)) {
       // Initial string offset
-      auto const initial_value = s->page.str_offset;
+      auto const initial_value = page.str_offset;
+
+      // We must use the batch size from the nesting info (the size of the page for this batch)
+      auto value_count = page.nesting[s->col.max_nesting_depth - 1].batch_size;
 
       // If no repetition we haven't calculated start/end bounds and instead just skipped
       // values until we reach first_row. account for that here.
-      auto value_count = s->page.num_input_values;
       if (not has_repetition) { value_count -= s->first_row; }
 
       auto& ni    = s->nesting_info[s->col.max_nesting_depth - 1];
@@ -316,6 +310,11 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
         offptr[idx] = initial_value;
       }
     }
+
+    page.num_nulls = page.nesting[s->col.max_nesting_depth - 1].batch_size;
+    page.num_nulls -= has_repetition ? 0 : s->first_row;
+    page.num_valids = 0;
+
     return;
   }
 
@@ -337,6 +336,10 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   __shared__ level_t rep[rolling_buf_size];  // circular buffer of repetition level values
   __shared__ level_t def[rolling_buf_size];  // circular buffer of definition level values
+
+  auto const is_decimal =
+    s->col.logical_type.has_value() and s->col.logical_type->type == LogicalType::DECIMAL;
+  Type const dtype = s->col.physical_type;
 
   auto const first_out_thread_id = out_warp_id * warp.size();
   // skipped_leaf_values will always be 0 for flat hierarchies.
@@ -383,7 +386,6 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       if (warp.thread_rank() == 0) { s->dict_pos = src_target_pos; }
     } else {
       // WARP1..WARP3: Decode values
-      Type const dtype = s->col.physical_type;
       src_pos += block.thread_rank() - first_out_thread_id;
 
       // the position in the output column/buffer
@@ -417,8 +419,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
         uint32_t const dtype_len = s->dtype_len;
         void* dst =
           nesting_info_base[leaf_level_index].data_out + static_cast<size_t>(dst_pos) * dtype_len;
-        auto const is_decimal =
-          s->col.logical_type.has_value() and s->col.logical_type->type == LogicalType::DECIMAL;
+
         if (dtype == Type::BYTE_ARRAY) {
           if (is_decimal) {
             auto const [ptr, len]        = gpuGetStringData(s, sb, val_src_pos);
@@ -485,11 +486,15 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   }
 
   // Zero-fill null positions after decoding valid values
-  auto const& ni = s->nesting_info[s->col.max_nesting_depth - 1];
-  if (ni.valid_map != nullptr) {
-    int const num_values = ni.valid_map_offset - init_valid_map_offset;
-    zero_fill_null_positions_shared<decode_block_size>(
-      s, s->dtype_len, init_valid_map_offset, num_values, static_cast<int>(block.thread_rank()));
+  auto const is_string =
+    ((dtype == Type::BYTE_ARRAY) && !is_decimal) || (dtype == Type::FIXED_LEN_BYTE_ARRAY);
+  if (is_string || has_repetition) {
+    auto const& ni = s->nesting_info[s->col.max_nesting_depth - 1];
+    if (ni.valid_map != nullptr) {
+      int const num_values = ni.valid_map_offset - init_valid_map_offset;
+      zero_fill_null_positions_shared<decode_block_size>(
+        s, s->dtype_len, init_valid_map_offset, num_values, static_cast<int>(block.thread_rank()));
+    }
   }
 
   if (block.thread_rank() == 0 and s->error != 0) { set_error(s->error, error_code); }

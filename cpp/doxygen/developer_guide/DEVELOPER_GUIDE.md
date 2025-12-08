@@ -6,6 +6,7 @@ to these additional files for further documentation of libcudf best practices.
 * [Documentation Guide](DOCUMENTATION.md) for guidelines on documenting libcudf code.
 * [Testing Guide](TESTING.md) for guidelines on writing unit tests.
 * [Benchmarking Guide](BENCHMARKING.md) for guidelines on writing unit benchmarks.
+* [Profiling Guide](PROFILING.md) for guidelines on profiling libcudf code.
 
 # Overview
 
@@ -463,6 +464,21 @@ Specifically:
 libcudf APIs _should_ promise to never return "dirty" columns, i.e. columns containing unsanitized
 data. Therefore, the only problem is if users construct input columns that are not correctly
 sanitized and then pass those into libcudf APIs.
+
+## Null values of fixed-width columns are undefined
+
+For columns of fixed-width types (such as integers, floats, timestamps, and durations), the values
+corresponding to null elements (where the validity mask bit is set to null) are **undefined** and
+may contain arbitrary data. libcudf makes no guarantees about the initialization or content of these
+values.
+
+Code should not assume that null rows in fixed-width columns contain any particular value, including
+zero. Algorithms must rely solely on the validity mask to determine nullness and should not inspect
+the underlying data values for null elements.
+
+This policy applies only to fixed-width types. It does **not** apply to variable-width types
+(strings) or nested types (lists, structs), which have their own requirements as described in the
+sections above.
 
 ## Treat libcudf APIs as if they were asynchronous
 

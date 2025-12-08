@@ -1,10 +1,16 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
 
 import pandas as pd
 import pytest
 
 import cudf
 from cudf.testing import assert_eq
+
+
+def test_dropna_bad_how():
+    with pytest.raises(ValueError):
+        cudf.Index([1]).dropna(how="foo")
 
 
 @pytest.mark.parametrize(
