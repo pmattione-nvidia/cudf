@@ -576,45 +576,6 @@ __device__ int update_validity_and_row_indices_flat(
 }
 
 /**
- * @brief Skip validity and row indices for non-nullable flat types
- *
- * @tparam decode_block_size Size of the thread block
- * @tparam state_buf State buffer type (inferred)
- *
- * @param target_value_count The target value count to process
- * @param s Pointer to  page state
- * @param sb Pointer to  state buffer
- * @param t Thread index
- *
- * @return Number of valid values processed
- */
-template <int decode_block_size, typename state_buf>
-__device__ int skip_validity_and_rows_indices_non_nullable(int32_t target_value_count,
-                                                             page_state_s* s,
-                                                             state_buf* sb,
-                                                             int t)
-{
-  // cap by last row so that we don't process any rows past what we want to output.
-  int const first_row                 = s->first_row;
-  int const last_row                  = first_row + s->num_rows;
-  int const capped_target_value_count = min(target_value_count, last_row);
-
-  int const max_depth = s->col.max_nesting_depth - 1;
-  auto& ni            = s->nesting_info[max_depth];
-
-  if (t == 0) {
-    // update valid value count for decoding and total # of values we've processed
-    ni.valid_count       = capped_target_value_count;
-    ni.value_count       = capped_target_value_count;
-    s->nz_count          = capped_target_value_count;
-    s->input_value_count = capped_target_value_count;
-    s->input_row_count   = capped_target_value_count;
-  }
-
-  return capped_target_value_count;
-}
-
-/**
  * @brief Update validity and row indices for list types
  *
  * @tparam decode_block_size Size of the thread block
@@ -887,45 +848,6 @@ __device__ inline bool maybe_has_nulls(page_state_s* s)
 
   // the encoded repeated value isn't valid, we have (all) nulls
   return run_val != s->col.max_level[lvl];
-}
-
-/**
- * @brief Skip validity and row indices for non-nullable flat types
- *
- * @tparam decode_block_size Size of the thread block
- * @tparam state_buf State buffer type (inferred)
- *
- * @param target_value_count The target value count to process
- * @param s Pointer to  page state
- * @param sb Pointer to  state buffer
- * @param t Thread index
- *
- * @return Number of valid values processed
- */
-template <int decode_block_size, typename state_buf>
-__device__ int skip_validity_and_rows_indices_non_nullable(int32_t target_value_count,
-                                                             page_state_s* s,
-                                                             state_buf* sb,
-                                                             int t)
-{
-  // cap by last row so that we don't process any rows past what we want to output.
-  int const first_row                 = s->first_row;
-  int const last_row                  = first_row + s->num_rows;
-  int const capped_target_value_count = min(target_value_count, last_row);
-
-  int const max_depth = s->col.max_nesting_depth - 1;
-  auto& ni            = s->nesting_info[max_depth];
-
-  if (t == 0) {
-    // update valid value count for decoding and total # of values we've processed
-    ni.valid_count       = capped_target_value_count;
-    ni.value_count       = capped_target_value_count;
-    s->nz_count          = capped_target_value_count;
-    s->input_value_count = capped_target_value_count;
-    s->input_row_count   = capped_target_value_count;
-  }
-
-  return capped_target_value_count;
 }
 
 template <typename state_buf, typename thread_group>
@@ -1213,13 +1135,6 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
           if (t == 0) { s->dict_pos = skipped_leaf_values; }
         }
         block.sync();
-      } else if constexpr (has_bools_t) {
-        if (bools_are_rle_stream) {
-          skip_decode<rolling_buf_size>(bool_stream, skipped_leaf_values, t);
-        } else {
-          if (t == 0) { s->dict_pos = skipped_leaf_values; }
-        }
-        block.sync();
       }
     }
   } else {
@@ -1242,9 +1157,6 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
       }
       if constexpr (has_dict_t) {
         skip_decode<rolling_buf_size>(dict_stream, valid_count, t);
-      } else if constexpr (has_strings_t) {
-        initialize_string_descriptors<is_calc_sizes_only::YES>(s, sb, valid_count, block);
-        if (t == 0) { s->dict_pos = valid_count; }
       } else if constexpr (has_bools_t) {
         if (bools_are_rle_stream) {
           skip_decode<rolling_buf_size>(bool_stream, valid_count, t);
