@@ -329,17 +329,17 @@ CUDF_KERNEL void __launch_bounds__(decode_delta_binary_block_size)
   }
 
   // Must be evaluated after setup_local_page_info
-  bool const has_repetition = s->col.max_level[level_type::REPETITION] > 0;
+  bool const has_repetition = s->col->max_level[level_type::REPETITION] > 0;
 
   // Capture initial valid_map_offset before any processing that might modify it
-  int const init_valid_map_offset = s->nesting_info[s->col.max_nesting_depth - 1].valid_map_offset;
+  int const init_valid_map_offset = s->nesting_info[s->col->max_nesting_depth - 1].valid_map_offset;
 
   // Write list offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
     auto& page = pages[page_idx];
     // Update offsets for all list depth levels
     if (has_repetition) { update_list_offsets_for_pruned_pages<decode_delta_binary_block_size>(s); }
-    page.num_nulls = page.nesting[s->col.max_nesting_depth - 1].batch_size;
+    page.num_nulls = page.nesting[s->col->max_nesting_depth - 1].batch_size;
     page.num_nulls -= has_repetition ? 0 : s->first_row;
     page.num_valids = 0;
     return;
@@ -352,7 +352,7 @@ CUDF_KERNEL void __launch_bounds__(decode_delta_binary_block_size)
   __shared__ level_t def[delta_rolling_buf_size];  // circular buffer of definition level values
 
   // skipped_leaf_values will always be 0 for flat hierarchies.
-  uint32_t const skipped_leaf_values = s->page.skipped_leaf_values;
+  uint32_t const skipped_leaf_values = s->page->skipped_leaf_values;
 
   // initialize delta state
   if (block.thread_rank() == 0) { db->init_binary_block(s->data_start, s->data_end); }
@@ -398,7 +398,7 @@ CUDF_KERNEL void __launch_bounds__(decode_delta_binary_block_size)
     } else if (src_pos < target_pos) {
       // warp 2
       // nesting level that is storing actual leaf values
-      int const leaf_level_index = s->col.max_nesting_depth - 1;
+      int const leaf_level_index = s->col->max_nesting_depth - 1;
 
       // process the mini-block using warps
       for (uint32_t sp = src_pos + warp.thread_rank(); sp < src_pos + batch_size;
@@ -429,7 +429,7 @@ CUDF_KERNEL void __launch_bounds__(decode_delta_binary_block_size)
 
   if (has_repetition) {
     // Zero-fill null positions after decoding valid values
-    auto const& ni = s->nesting_info[s->col.max_nesting_depth - 1];
+    auto const& ni = s->nesting_info[s->col->max_nesting_depth - 1];
     if (ni.valid_map != nullptr) {
       int const num_values = ni.valid_map_offset - init_valid_map_offset;
       zero_fill_null_positions_shared<decode_block_size>(
@@ -481,7 +481,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
     return;
   }
 
-  if (s->col.logical_type.has_value() && s->col.logical_type->type == LogicalType::DECIMAL) {
+  if (s->col->logical_type.has_value() && s->col->logical_type->type == LogicalType::DECIMAL) {
     // we cannot read decimal encoded with DELTA_BYTE_ARRAY yet
     if (block.thread_rank() == 0) {
       set_error(static_cast<kernel_error::value_type>(decode_error::INVALID_DATA_TYPE), error_code);
@@ -489,10 +489,10 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
     return;
   }
 
-  bool const has_repetition = s->col.max_level[level_type::REPETITION] > 0;
+  bool const has_repetition = s->col->max_level[level_type::REPETITION] > 0;
 
   // Capture initial valid_map_offset before any processing that might modify it
-  int const init_valid_map_offset = s->nesting_info[s->col.max_nesting_depth - 1].valid_map_offset;
+  int const init_valid_map_offset = s->nesting_info[s->col->max_nesting_depth - 1].valid_map_offset;
 
   // Write list/string offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
@@ -509,7 +509,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       update_string_offsets_for_pruned_pages<decode_block_size, false>(
         s, initial_str_offsets, pages[page_idx]);
     }
-    page->num_nulls = page->nesting[s->col.max_nesting_depth - 1].batch_size;
+    page->num_nulls = page->nesting[s->col->max_nesting_depth - 1].batch_size;
     page->num_nulls -= has_repetition ? 0 : s->first_row;
     page->num_valids = 0;
 
@@ -517,7 +517,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   }
 
   // choose a character parallel string copy when the average string is longer than a warp
-  auto const use_char_ll = (s->page.str_bytes / s->page.num_valids) > cudf::detail::warp_size;
+  auto const use_char_ll = (s->page->str_bytes / s->page->num_valids) > cudf::detail::warp_size;
 
   // copying logic from decode_page_data.
   PageNestingDecodeInfo const* nesting_info_base = s->nesting_info;
@@ -526,11 +526,11 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   __shared__ level_t def[delta_rolling_buf_size];  // circular buffer of definition level values
 
   // skipped_leaf_values will always be 0 for flat hierarchies.
-  uint32_t const skipped_leaf_values = s->page.skipped_leaf_values;
+  uint32_t const skipped_leaf_values = s->page->skipped_leaf_values;
 
   if (block.thread_rank() == 0) {
     // initialize the prefixes and suffixes blocks
-    dba->init(s->data_start, s->data_end, s->page.start_val, s->page.temp_string_buf);
+    dba->init(s->data_start, s->data_end, s->page->start_val, s->page->temp_string_buf);
   }
   block.sync();
 
@@ -544,7 +544,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   }
 
   // pointer to location to output final strings
-  int const leaf_level_index = s->col.max_nesting_depth - 1;
+  int const leaf_level_index = s->col->max_nesting_depth - 1;
   auto strings_data          = nesting_info_base[leaf_level_index].string_out;
 
   // sanity check to make sure we can process this page
@@ -557,7 +557,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // if this is a bounds page and nested, then we need to skip up front. non-nested will work
   // its way through the page.
-  int string_pos          = has_repetition ? s->page.start_val : 0;
+  int string_pos          = has_repetition ? s->page->start_val : 0;
   auto const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
   if (is_bounds_pg && string_pos > 0) { dba->skip(use_char_ll); }
 
@@ -590,7 +590,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       suffix_db->decode_batch();
     } else if (warp.meta_group_rank() == 3 and src_pos < target_pos) {
       // warp 3
-      int const nproc = min(batch_size, s->page.end_val - string_pos);
+      int const nproc = min(batch_size, s->page->end_val - string_pos);
       strings_data +=
         use_char_ll
           ? dba->calculate_string_values_cp(strings_data, string_pos, nproc, warp.thread_rank())
@@ -634,7 +634,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // For large strings, update the initial string buffer offset to be used during large string
   // column construction. Otherwise, convert string sizes to final offsets.
-  if (s->col.is_large_string_col) {
+  if (s->col->is_large_string_col) {
     // page.chunk_idx are ordered by input_col_idx and row_group_idx respectively.
     auto const chunks_per_rowgroup = initial_str_offsets.size();
     auto const input_col_idx       = pages[page_idx].chunk_idx % chunks_per_rowgroup;
@@ -691,7 +691,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
     return;
   }
 
-  if (s->col.logical_type.has_value() && s->col.logical_type->type == LogicalType::DECIMAL) {
+  if (s->col->logical_type.has_value() && s->col->logical_type->type == LogicalType::DECIMAL) {
     // we cannot read decimal encoded with DELTA_LENGTH_BYTE_ARRAY yet
     if (block.thread_rank() == 0) {
       set_error(static_cast<kernel_error::value_type>(decode_error::INVALID_DATA_TYPE), error_code);
@@ -699,10 +699,10 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
     return;
   }
 
-  bool const has_repetition = s->col.max_level[level_type::REPETITION] > 0;
+  bool const has_repetition = s->col->max_level[level_type::REPETITION] > 0;
 
   // Capture initial valid_map_offset before any processing that might modify it
-  int const init_valid_map_offset = s->nesting_info[s->col.max_nesting_depth - 1].valid_map_offset;
+  int const init_valid_map_offset = s->nesting_info[s->col->max_nesting_depth - 1].valid_map_offset;
 
   // Write list/string offsets and exit if the page does not need to be decoded
   if (not page_mask[page_idx]) {
@@ -719,7 +719,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       update_string_offsets_for_pruned_pages<decode_block_size, false>(
         s, initial_str_offsets, pages[page_idx]);
     }
-    page->num_nulls = page->nesting[s->col.max_nesting_depth - 1].batch_size;
+    page->num_nulls = page->nesting[s->col->max_nesting_depth - 1].batch_size;
     page->num_nulls -= has_repetition ? 0 : s->first_row;
     page->num_valids = 0;
 
@@ -733,7 +733,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   __shared__ level_t def[delta_rolling_buf_size];  // circular buffer of definition level values
 
   // skipped_leaf_values will always be 0 for flat hierarchies.
-  uint32_t const skipped_leaf_values = s->page.skipped_leaf_values;
+  uint32_t const skipped_leaf_values = s->page->skipped_leaf_values;
 
   // initialize delta state
   if (block.thread_rank() == 0) {
@@ -742,7 +742,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   }
   block.sync();
 
-  int const leaf_level_index = s->col.max_nesting_depth - 1;
+  int const leaf_level_index = s->col->max_nesting_depth - 1;
 
   // sanity check to make sure we can process this page
   auto const batch_size = db->values_per_mb;
@@ -755,10 +755,10 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   // that has a value we need, and set string_offset to the position of the first value in the
   // string data block.
   auto const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
-  if (is_bounds_pg && s->page.start_val > 0) {
+  if (is_bounds_pg && s->page->start_val > 0) {
     if (warp.meta_group_rank() == 0) {
       // string_off is only valid on thread 0
-      auto const string_off = db->skip_values_and_sum(s->page.start_val);
+      auto const string_off = db->skip_values_and_sum(s->page->start_val);
       if (warp.thread_rank() == 0) {
         string_offset = string_off;
 
@@ -770,7 +770,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
     block.sync();
   }
 
-  int string_pos = has_repetition ? s->page.start_val : 0;
+  int string_pos = has_repetition ? s->page->start_val : 0;
 
   while (!s->error && (s->input_value_count < s->num_input_values || s->src_pos < s->nz_count)) {
     uint32_t target_pos;
@@ -800,7 +800,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
       db->decode_batch();
     } else if (warp.meta_group_rank() == 2 && src_pos < target_pos) {
       // warp 2
-      int const nproc = min(batch_size, s->page.end_val - string_pos);
+      int const nproc = min(batch_size, s->page->end_val - string_pos);
       string_pos += nproc;
 
       // process the mini-block in batches of 32
@@ -839,7 +839,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
 
   // For large strings, update the initial string buffer offset to be used during large string
   // column construction. Otherwise, convert string sizes to final offsets.
-  if (s->col.is_large_string_col) {
+  if (s->col->is_large_string_col) {
     // page.chunk_idx are ordered by input_col_idx and row_group_idx respectively.
     auto const chunks_per_rowgroup = initial_str_offsets.size();
     auto const input_col_idx       = pages[page_idx].chunk_idx % chunks_per_rowgroup;
@@ -860,7 +860,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
   // finally, copy the string data into place
   auto const dst = nesting_info_base[leaf_level_index].string_out;
   auto const src = page_string_data + string_offset;
-  memcpy_block<decode_block_size, true>(dst, src, s->page.str_bytes, block);
+  memcpy_block<decode_block_size, true>(dst, src, s->page->str_bytes, block);
 
   if (block.thread_rank() == 0 and s->error != 0) { set_error(s->error, error_code); }
 }

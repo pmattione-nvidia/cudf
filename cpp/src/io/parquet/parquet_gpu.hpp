@@ -264,8 +264,8 @@ struct PageNestingDecodeInfo {
   int32_t valid_map_offset;
   int32_t valid_count;
   int32_t value_count;
-  uint8_t* data_out;
-  uint8_t* string_out;
+  uint8_t* data_out; //Offsets for lists at NOT!! LAST LEVEL OF NESTING
+  uint8_t* string_out; //ONLY NEEDED FOR LAST LEVEL OF NESTING
   bitmask_type* valid_map;
 };
 

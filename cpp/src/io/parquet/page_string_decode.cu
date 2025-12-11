@@ -67,39 +67,39 @@ __device__ cuda::std::pair<int, int> page_bounds(
 
   // decode batches of level stream data using rle_stream objects and use the results to
   // calculate start and end value positions in the encoded string data.
-  int const max_depth = s->col.max_nesting_depth;
+  int const max_depth = s->col->max_nesting_depth;
   int const max_def   = s->nesting_info[max_depth - 1].max_def_level;
 
   // can skip all this if we know there are no nulls
   if (max_def == 0 && !is_bounds_pg) {
     if (t == 0) {
-      s->page.num_valids = s->num_input_values;
-      s->page.num_nulls  = 0;
+      s->page->num_valids = s->num_input_values;
+      s->page->num_nulls  = 0;
     }
     return {0, s->num_input_values};
   }
 
   int start_value = 0;
-  int end_value   = s->page.num_input_values;
-  auto const pp   = &s->page;
-  auto const col  = &s->col;
+  int end_value   = s->page->num_input_values;
+  auto const pp   = s->page;
+  auto const col  = s->col;
 
   // initialize the stream decoders (requires values computed in setup_local_page_info)
   auto const def_decode = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::DEFINITION]);
   auto const rep_decode = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::REPETITION]);
-  decoders[level_type::DEFINITION].init(s->col.level_bits[level_type::DEFINITION],
+  decoders[level_type::DEFINITION].init(s->col->level_bits[level_type::DEFINITION],
                                         s->abs_lvl_start[level_type::DEFINITION],
                                         s->abs_lvl_end[level_type::DEFINITION],
                                         def_decode,
-                                        s->page.num_input_values);
+                                        s->page->num_input_values);
   // only need repetition if this is a bounds page. otherwise all we need is def level info
   // to count the nulls.
   if (has_repetition && is_bounds_pg) {
-    decoders[level_type::REPETITION].init(s->col.level_bits[level_type::REPETITION],
+    decoders[level_type::REPETITION].init(s->col->level_bits[level_type::REPETITION],
                                           s->abs_lvl_start[level_type::REPETITION],
                                           s->abs_lvl_end[level_type::REPETITION],
                                           rep_decode,
-                                          s->page.num_input_values);
+                                          s->page->num_input_values);
   }
 
   int processed = 0;
@@ -155,7 +155,7 @@ __device__ cuda::std::pair<int, int> page_bounds(
       __syncthreads();
     }
 
-    while (processed < s->page.num_input_values) {
+    while (processed < s->page->num_input_values) {
       thread_index_type start_val = processed;
 
       if (has_repetition) {
@@ -266,7 +266,7 @@ __device__ cuda::std::pair<int, int> page_bounds(
   // already filtered out unwanted pages, so need to count all non-null values in this page
   else {
     int num_nulls = 0;
-    while (processed < s->page.num_input_values) {
+    while (processed < s->page->num_input_values) {
       thread_index_type start_val = processed;
       processed += decoders[level_type::DEFINITION].decode_next(t);
       __syncthreads();
@@ -658,8 +658,8 @@ CUDF_KERNEL void __launch_bounds__(preprocess_block_size)
 
   // need to save num_nulls and num_valids calculated in page_bounds in this page
   if (t == 0) {
-    pp->num_nulls  = s->page.num_nulls;
-    pp->num_valids = s->page.num_valids;
+    pp->num_nulls  = s->page->num_nulls;
+    pp->num_valids = s->page->num_valids;
     pp->start_val  = start_value;
     pp->end_val    = end_value;
   }
@@ -931,7 +931,7 @@ CUDF_KERNEL void __launch_bounds__(preprocess_block_size)
     return;
   }
 
-  auto const& col  = s->col;
+  auto const& col  = *(s->col);
   size_t str_bytes = 0;
   // short circuit for FIXED_LEN_BYTE_ARRAY
   if (col.physical_type == Type::FIXED_LEN_BYTE_ARRAY) {

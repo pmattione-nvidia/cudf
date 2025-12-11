@@ -89,13 +89,13 @@ __device__ void decode_fixed_width_values(
   constexpr int max_batch_size = num_warps * cudf::detail::warp_size;
 
   // nesting level that is storing actual leaf values
-  int const leaf_level_index = s->col.max_nesting_depth - 1;
+  int const leaf_level_index = s->col->max_nesting_depth - 1;
   auto const data_out        = s->nesting_info[leaf_level_index].data_out;
 
-  Type const dtype         = s->col.physical_type;
+  Type const dtype         = s->col->physical_type;
   uint32_t const dtype_len = s->dtype_len;
 
-  int const skipped_leaf_values = s->page.skipped_leaf_values;
+  int const skipped_leaf_values = s->page->skipped_leaf_values;
 
   // decode values
   int thread_pos = start + t;
@@ -126,7 +126,7 @@ __device__ void decode_fixed_width_values(
 
       void* const dst = data_out + (static_cast<size_t>(dst_pos) * dtype_len);
 
-      if (s->col.logical_type.has_value() && s->col.logical_type->type == LogicalType::DECIMAL) {
+      if (s->col->logical_type.has_value() && s->col->logical_type->type == LogicalType::DECIMAL) {
         switch (dtype) {
           case Type::INT32:
             read_fixed_width_value_fast(s, sb, src_pos, static_cast<uint32_t*>(dst));
@@ -182,14 +182,14 @@ __device__ inline void decode_fixed_width_split_values(
   constexpr int max_batch_size = num_warps * warp_size;
 
   // nesting level that is storing actual leaf values
-  int const leaf_level_index = s->col.max_nesting_depth - 1;
+  int const leaf_level_index = s->col->max_nesting_depth - 1;
   auto const data_out        = s->nesting_info[leaf_level_index].data_out;
 
-  Type const dtype      = s->col.physical_type;
+  Type const dtype      = s->col->physical_type;
   auto const data_len   = cuda::std::distance(s->data_start, s->data_end);
   auto const num_values = data_len / s->dtype_len_in;
 
-  int const skipped_leaf_values = s->page.skipped_leaf_values;
+  int const skipped_leaf_values = s->page->skipped_leaf_values;
 
   // decode values
   int thread_pos = start + t;
@@ -223,7 +223,7 @@ __device__ inline void decode_fixed_width_split_values(
       uint8_t const* const src = s->data_start + src_pos;
       uint8_t* const dst       = data_out + static_cast<size_t>(dst_pos) * dtype_len;
       auto const is_decimal =
-        s->col.logical_type.has_value() and s->col.logical_type->type == LogicalType::DECIMAL;
+        s->col->logical_type.has_value() and s->col->logical_type->type == LogicalType::DECIMAL;
 
       // Note: non-decimal FIXED_LEN_BYTE_ARRAY will be handled in the string reader
       if (is_decimal) {
@@ -304,7 +304,7 @@ __device__ int update_validity_and_row_indices_nested(
   int const last_row                  = first_row + s->num_rows;
   int const capped_target_value_count = min(target_value_count, last_row);
 
-  int const max_depth       = s->col.max_nesting_depth - 1;
+  int const max_depth       = s->col->max_nesting_depth - 1;
   auto& max_depth_ni        = s->nesting_info[max_depth];
   int max_depth_valid_count = max_depth_ni.valid_count;
 
@@ -573,7 +573,7 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
   int const last_row  = first_row + s->num_rows;
 
   int const row_index_lower_bound = s->row_index_lower_bound;
-  int const max_depth             = s->col.max_nesting_depth - 1;
+  int const max_depth             = s->col->max_nesting_depth - 1;
   int max_depth_valid_count       = s->nesting_info[max_depth].valid_count;
 
   int const warp_index     = t / cudf::detail::warp_size;
@@ -788,7 +788,7 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
 __device__ inline bool is_nullable(page_state_s* s)
 {
   auto const lvl           = level_type::DEFINITION;
-  auto const max_def_level = s->col.max_level[lvl];
+  auto const max_def_level = s->col->max_level[lvl];
   return max_def_level > 0;
 }
 
@@ -802,13 +802,13 @@ __device__ inline bool maybe_has_nulls(page_state_s* s)
 
   // repeated run with number of items in the run not equal
   // to the rows in the page, assume that means we could have nulls
-  if (s->page.num_input_values != (init_run >> 1)) { return true; }
+  if (s->page->num_input_values != (init_run >> 1)) { return true; }
 
-  auto const lvl_bits = s->col.level_bits[lvl];
+  auto const lvl_bits = s->col->level_bits[lvl];
   auto const run_val  = lvl_bits == 0 ? 0 : s->initial_rle_value[lvl];
 
   // the encoded repeated value isn't valid, we have (all) nulls
-  return run_val != s->col.max_level[lvl];
+  return run_val != s->col->max_level[lvl];
 }
 
 template <typename state_buf, typename thread_group>
@@ -961,6 +961,11 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
 
   if (!(BitAnd(pages[page_idx].kernel_mask, kernel_mask_t))) { return; }
 
+/*  if (t == 0) {
+    printf("SIZES: page_state_s: %d, PageInfo: %d, ColumnChunkDesc: %d, PageNestingDecodeInfo: %d\n", 
+      int(sizeof(page_state_s)), int(sizeof(PageInfo)), int(sizeof(ColumnChunkDesc)), int(sizeof(PageNestingDecodeInfo)));
+  }*/
+  
   // must come after the kernel mask check
   [[maybe_unused]] null_count_back_copier _{s, t};
 
@@ -996,7 +1001,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
         s, initial_str_offsets, pages[page_idx]);
     }
     // Must be set after computing above list and string offsets
-    pp->num_nulls = pp->nesting[s->col.max_nesting_depth - 1].batch_size;
+    pp->num_nulls = pp->nesting[s->col->max_nesting_depth - 1].batch_size;
     if constexpr (not has_lists_t) { pp->num_nulls -= s->first_row; }
     pp->num_valids = 0;
 
@@ -1031,27 +1036,27 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   rle_stream<level_t, decode_block_size_t, rolling_buf_size> def_decoder{def_runs};
   level_t* const def = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::DEFINITION]);
   if (should_process_nulls) {
-    def_decoder.init(s->col.level_bits[level_type::DEFINITION],
+    def_decoder.init(s->col->level_bits[level_type::DEFINITION],
                      s->abs_lvl_start[level_type::DEFINITION],
                      s->abs_lvl_end[level_type::DEFINITION],
                      def,
-                     s->page.num_input_values);
+                     s->page->num_input_values);
   }
 
   rle_stream<level_t, decode_block_size_t, rolling_buf_size> rep_decoder{rep_runs};
   level_t* const rep = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::REPETITION]);
   if constexpr (has_lists_t) {
-    rep_decoder.init(s->col.level_bits[level_type::REPETITION],
+    rep_decoder.init(s->col->level_bits[level_type::REPETITION],
                      s->abs_lvl_start[level_type::REPETITION],
                      s->abs_lvl_end[level_type::REPETITION],
                      rep,
-                     s->page.num_input_values);
+                     s->page->num_input_values);
   }
 
   rle_stream<uint32_t, decode_block_size_t, rolling_buf_size> dict_stream{dict_runs};
   if constexpr (has_dict_t) {
     dict_stream.init(
-      s->dict_bits, s->data_start, s->data_end, sb->dict_idx, s->page.num_input_values);
+      s->dict_bits, s->data_start, s->data_end, sb->dict_idx, s->page->num_input_values);
   }
 
   // Use dictionary stream memory for bools
@@ -1059,7 +1064,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   bool bools_are_rle_stream = (s->dict_run == 0);
   if constexpr (has_bools_t) {
     if (bools_are_rle_stream) {
-      bool_stream.init(1, s->data_start, s->data_end, sb->dict_idx, s->page.num_input_values);
+      bool_stream.init(1, s->data_start, s->data_end, sb->dict_idx, s->page->num_input_values);
     }
   }
   block.sync();
@@ -1074,12 +1079,12 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   int processed_count             = 0;
   int valid_count                 = 0;
   size_t string_output_offset     = 0;
-  int const init_valid_map_offset = s->nesting_info[s->col.max_nesting_depth - 1].valid_map_offset;
+  int const init_valid_map_offset = s->nesting_info[s->col->max_nesting_depth - 1].valid_map_offset;
   uint32_t* const str_offsets =
-    s->col.column_string_offset_base + page_string_offset_indices[page_idx];
+    s->col->column_string_offset_base + page_string_offset_indices[page_idx];
 
   // Skip ahead in the decoding so that we don't repeat work (skipped_leaf_values = 0 for non-lists)
-  auto const skipped_leaf_values = s->page.skipped_leaf_values;
+  auto const skipped_leaf_values = s->page->skipped_leaf_values;
   if constexpr (has_lists_t) {
     if (skipped_leaf_values > 0) {
       if (should_process_nulls) {
@@ -1104,7 +1109,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   // For chunked reads we may not process all of the rows on the page; if not stop early
   int const first_row = s->first_row;
   int const last_row  = first_row + s->num_rows;
-  while ((s->error == 0) && (processed_count < s->page.num_input_values) &&
+  while ((s->error == 0) && (processed_count < s->page->num_input_values) &&
          (s->input_row_count <= last_row)) {
     int next_valid_count;
 
@@ -1141,7 +1146,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
         // direct copy: no nulls, no lists, no need to update validity or row indices
         // This ASSUMES that s->row_index_lower_bound is always -1!
         // Its purpose is to handle rows than span page boundaries, which only happen for lists.
-        processed_count += min(rolling_buf_size, s->page.num_input_values - processed_count);
+        processed_count += min(rolling_buf_size, s->page->num_input_values - processed_count);
         int const capped_target_value_count = min(processed_count, last_row);
         if (t == 0) { s->input_row_count = capped_target_value_count; }
         next_valid_count = capped_target_value_count;
@@ -1200,7 +1205,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
       uint32_t const dtype_len = has_strings_t ? sizeof(cudf::size_type) : s->dtype_len;
       int const num_values     = [&]() {
         if constexpr (has_lists_t) {
-          auto const& ni = s->nesting_info[s->col.max_nesting_depth - 1];
+          auto const& ni = s->nesting_info[s->col->max_nesting_depth - 1];
           return ni.valid_map_offset - init_valid_map_offset;
         } else {
           return s->num_rows;
@@ -1218,13 +1223,13 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
     if constexpr (!has_lists_t) {
       if (!should_process_nulls) {
         if (t == 0) {
-          s->nesting_info[s->col.max_nesting_depth - 1].value_count = s->input_row_count;
+          s->nesting_info[s->col->max_nesting_depth - 1].value_count = s->input_row_count;
         }
         block.sync();
       }
     }
 
-    if (s->col.is_large_string_col) {
+    if (s->col->is_large_string_col) {
       // page.chunk_idx are ordered by input_col_idx and row_group_idx respectively.
       auto const chunks_per_rowgroup = initial_str_offsets.size();
       auto const input_col_idx       = pages[page_idx].chunk_idx % chunks_per_rowgroup;

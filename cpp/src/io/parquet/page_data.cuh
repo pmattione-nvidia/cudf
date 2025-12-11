@@ -23,7 +23,7 @@ template <typename state_buf>
 inline __device__ void gpuOutputString(page_state_s* s, state_buf* sb, int src_pos, void* dstv)
 {
   auto [ptr, len] = gpuGetStringData(s, sb, src_pos);
-  if (s->col.is_strings_to_cat and s->col.physical_type == Type::BYTE_ARRAY) {
+  if (s->col->is_strings_to_cat and s->col->physical_type == Type::BYTE_ARRAY) {
     // Output hash. This hash value is used if the option to convert strings to
     // categoricals is enabled. The seed value is chosen arbitrarily.
     uint32_t constexpr hash_seed = 33;
@@ -161,7 +161,7 @@ inline __device__ void read_int96_timestamp(page_state_s* s,
     days - 2440588};  // TBD: Should be noon instead of midnight, but this matches pyarrow
 
   *dst = [&]() {
-    switch (s->col.ts_clock_rate) {
+    switch (s->col->ts_clock_rate) {
       case 1:  // seconds
         return duration_cast<duration_s>(d_d).count() +
                duration_cast<duration_s>(duration_ns{nanos}).count();
