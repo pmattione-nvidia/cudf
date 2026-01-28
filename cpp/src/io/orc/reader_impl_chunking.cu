@@ -216,6 +216,7 @@ template std::vector<range> find_splits<cumulative_size_and_row>(
 // subsets are computed such that memory usage will be kept to be around a fixed size limit.
 void reader_impl::preprocess_file(read_mode mode)
 {
+  CUDF_FUNC_RANGE();
   if (_file_itm_data.global_preprocessed) { return; }
   _file_itm_data.global_preprocessed = true;
 

@@ -360,6 +360,7 @@ std::tuple<rmm::device_uvector<page_span>, size_t, size_t> compute_next_subpass(
   bool has_page_index,
   rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   auto [aggregated_info, page_keys_by_split] = adjust_cumulative_sizes(c_info, pages, stream);
 
   // bring back to the cpu
@@ -695,6 +696,7 @@ rmm::device_uvector<size_t> compute_decompression_scratch_sizes(
   device_span<PageInfo const> pages,
   rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   auto page_keys = make_page_key_iterator(pages);
 
   // per-codec page counts and decompression sizes

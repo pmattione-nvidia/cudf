@@ -988,6 +988,7 @@ void compute_page_string_sizes_pass1(cudf::detail::hostdevice_span<PageInfo> pag
                                      int level_type_size,
                                      rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   dim3 const dim_block(preprocess_block_size, 1);
   dim3 const dim_grid(pages.size(), 1);  // 1 threadblock per page
 

@@ -355,6 +355,7 @@ struct compute_page_offset_count {
 
 void reader_impl::compute_page_string_offset_indices(size_t skip_rows, size_t num_rows)
 {
+  CUDF_FUNC_RANGE();
   auto& pass    = *_pass_itm_data;
   auto& subpass = *pass.subpass;
 
@@ -489,6 +490,7 @@ std::pair<bool, std::future<void>> reader_impl::read_column_chunks()
 
 void reader_impl::read_compressed_data()
 {
+  CUDF_FUNC_RANGE();
   auto& pass = *_pass_itm_data;
 
   // This function should never be called if `num_rows == 0`.
@@ -605,6 +607,7 @@ void reader_impl::preprocess_file(read_mode mode)
 
 void reader_impl::generate_list_column_row_counts(is_estimate_row_counts is_estimate_row_counts)
 {
+  CUDF_FUNC_RANGE();
   auto& pass = *_pass_itm_data;
 
   // Computes:

@@ -576,6 +576,7 @@ reader_impl::reader_impl(std::size_t chunk_read_limit,
 
 void reader_impl::prepare_data(read_mode mode)
 {
+  CUDF_FUNC_RANGE();
   // if we have not preprocessed at the whole-file level, do that now
   if (!_file_preprocessed) {
     // setup file level information
