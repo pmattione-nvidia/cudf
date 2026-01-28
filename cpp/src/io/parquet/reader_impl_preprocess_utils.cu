@@ -278,6 +278,7 @@ void fill_in_page_info(host_span<ColumnChunkDesc> chunks,
                        device_span<PageInfo> pages,
                        rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   auto const num_pages = pages.size();
   auto page_indexes    = cudf::detail::make_pinned_vector_async<page_index_info>(num_pages, stream);
 

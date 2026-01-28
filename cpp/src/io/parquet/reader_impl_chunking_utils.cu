@@ -258,6 +258,7 @@ adjust_cumulative_sizes(device_span<cumulative_page_info const> c_info,
                         device_span<PageInfo const> pages,
                         rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   // sort by row count
   rmm::device_uvector<cumulative_page_info> c_info_sorted(c_info.size(), stream);
   {
@@ -413,6 +414,7 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
                                                   size_t size_limit,
                                                   rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   auto [aggregated_info, page_keys_by_split] = adjust_cumulative_sizes(c_info, pages, stream);
 
   // bring back to the cpu

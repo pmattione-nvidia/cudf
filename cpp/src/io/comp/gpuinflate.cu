@@ -1372,6 +1372,7 @@ void gpu_copy_uncompressed_blocks(device_span<device_span<uint8_t const> const> 
                                   device_span<device_span<uint8_t> const> outputs,
                                   rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   constexpr auto block_size = 1024;
   if (inputs.size() > 0) {
     copy_uncompressed_kernel<<<inputs.size(), block_size, 0, stream.value()>>>(inputs, outputs);

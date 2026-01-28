@@ -906,6 +906,7 @@ void decode_page_headers(cudf::device_span<ColumnChunkDesc const> chunks,
                          kernel_error::pointer error_code,
                          rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   static_assert(decode_page_headers_block_size % cudf::detail::warp_size == 0,
                 "Block size for decode page headers kernel must be a multiple of warp size");
 
@@ -928,6 +929,7 @@ void decode_page_headers_with_pgidx(cudf::device_span<ColumnChunkDesc const> chu
                                     kernel_error::pointer error_code,
                                     rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   thrust::for_each(rmm::exec_policy_nosync(stream),
                    thrust::counting_iterator(0),
                    thrust::counting_iterator<cudf::size_type>(pages.size()),
@@ -942,6 +944,7 @@ void build_string_dictionary_index(ColumnChunkDesc* chunks,
                                    int32_t num_chunks,
                                    rmm::cuda_stream_view stream)
 {
+  CUDF_FUNC_RANGE();
   static_assert(
     build_string_dict_index_block_size % cudf::detail::warp_size == 0,
     "Block size for build string dictionary index kernel must be a multiple of warp size");
