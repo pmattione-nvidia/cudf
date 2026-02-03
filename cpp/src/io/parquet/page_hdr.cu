@@ -830,69 +830,76 @@ CUDF_KERNEL void __launch_bounds__(count_page_headers_block_size)
     static_cast<cudf::size_type>((cg::this_grid().block_rank() * num_warps_per_block) + warp_id);
   auto const num_chunks = static_cast<cudf::size_type>(chunks.size());
 
-  __shared__ byte_stream_s bs_g[num_warps_per_block];
+  __shared__ byte_stream_s_new bs_g[num_warps_per_block];
   __shared__ kernel_error::value_type error[num_warps_per_block];
+  __shared__ uint8_t prefetch_bufs[num_warps_per_block][byte_stream_s_new::prefetch_size];
 
   auto const bs = &bs_g[warp_id];
 
-  if (lane_id == 0) {
-    if (chunk_idx < num_chunks) { bs->ck = chunks[chunk_idx]; }
-    error[warp_id] = 0;
+  if (chunk_idx >= num_chunks) {
+    return;
   }
-  block.sync();
 
-  if (chunk_idx < num_chunks) {
-    if (lane_id == 0) {
-      bs->base = bs->cur = bs->ck.compressed_data;
-      bs->end            = bs->base + bs->ck.compressed_size;
-    }
-    size_t const num_values        = bs->ck.num_values;
-    size_t values_found            = 0;
-    uint32_t data_page_count       = 0;
-    uint32_t dictionary_page_count = 0;
+  if (lane_id == 0) {
+    bs->ck = chunks[chunk_idx];
+    error[warp_id] = 0;
+    bs->base = bs->cur = bs->ck.compressed_data;
+    bs->end            = bs->base + bs->ck.compressed_size;
+    bs->prefetch_buf = prefetch_bufs[warp_id];
+    bs->prefetch_len = 0;
+    bs->prefetch_pos = 0;
+    bs->prefetch_base = bs->ck.compressed_data;
+  }
+  warp.sync();
+
+  size_t const num_values        = bs->ck.num_values;
+  size_t values_found            = 0;
+  uint32_t data_page_count       = 0;
+  uint32_t dictionary_page_count = 0;
+  while (values_found < num_values and bs->cur < bs->end) {
+    // ALL threads call parse_page_header_fn for cooperative prefetching
+    bool parse_success = parse_page_header_fn{}(bs);
     warp.sync();
-    while (values_found < num_values and bs->cur < bs->end) {
-      if (lane_id == 0) {
-        if (parse_page_header_fn{}(bs) and bs->page.compressed_page_size >= 0) {
-          if (not is_supported_encoding(bs->page.encoding)) {
-            error[warp_id] |=
-              static_cast<kernel_error::value_type>(decode_error::UNSUPPORTED_ENCODING);
-          }
-          switch (bs->page_type) {
-            case PageType::DATA_PAGE:
-              data_page_count++;
-              values_found += bs->page.num_input_values;
-              break;
-            case PageType::DATA_PAGE_V2:
-              data_page_count++;
-              values_found += bs->page.num_input_values;
-              break;
-            case PageType::DICTIONARY_PAGE: dictionary_page_count++; break;
-            default:
-              error[warp_id] |=
-                static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_TYPE);
-              bs->cur = bs->end;
-              break;
-          }
-          bs->cur += bs->page.compressed_page_size;
-          if (bs->cur > bs->end) {
-            error[warp_id] |=
-              static_cast<kernel_error::value_type>(decode_error::DATA_STREAM_OVERRUN);
-          }
-        } else {
-          error[warp_id] |=
-            static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_HEADER);
-          bs->cur = bs->end;
-        }
-      }
-      values_found = shuffle(values_found);
-      warp.sync();
-    }
     if (lane_id == 0) {
-      chunks[chunk_idx].num_data_pages = data_page_count;
-      chunks[chunk_idx].num_dict_pages = dictionary_page_count;
-      if (error[warp_id] != 0) { set_error(error[warp_id], error_code); }
+      if (parse_success and bs->page.compressed_page_size >= 0) {
+        if (not is_supported_encoding(bs->page.encoding)) {
+          error[warp_id] |=
+            static_cast<kernel_error::value_type>(decode_error::UNSUPPORTED_ENCODING);
+        }
+        switch (bs->page_type) {
+          case PageType::DATA_PAGE:
+            data_page_count++;
+            values_found += bs->page.num_input_values;
+            break;
+          case PageType::DATA_PAGE_V2:
+            data_page_count++;
+            values_found += bs->page.num_input_values;
+            break;
+          case PageType::DICTIONARY_PAGE: dictionary_page_count++; break;
+          default:
+            error[warp_id] |=
+              static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_TYPE);
+            bs->cur = bs->end;
+            break;
+        }
+        bs->cur += bs->page.compressed_page_size;
+        if (bs->cur > bs->end) {
+          error[warp_id] |=
+            static_cast<kernel_error::value_type>(decode_error::DATA_STREAM_OVERRUN);
+        }
+      } else {
+        error[warp_id] |=
+          static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_HEADER);
+        bs->cur = bs->end;
+      }
     }
+    values_found = shuffle(values_found);
+    warp.sync();
+  }
+  if (lane_id == 0) {
+    chunks[chunk_idx].num_data_pages = data_page_count;
+    chunks[chunk_idx].num_dict_pages = dictionary_page_count;
+    if (error[warp_id] != 0) { set_error(error[warp_id], error_code); }
   }
 }
 
