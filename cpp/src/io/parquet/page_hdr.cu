@@ -33,7 +33,7 @@ namespace cg = cooperative_groups;
  *
  * See: https://github.com/apache/thrift/blob/master/doc/specs/thrift-compact-protocol.md
  */
-struct byte_stream_s {
+ struct byte_stream_s {
   uint8_t const* cur{};
   uint8_t const* end{};
   uint8_t const* base{};
@@ -54,11 +54,114 @@ inline __device__ unsigned int getb(byte_stream_s* bs)
 {
   return (bs->cur < bs->end) ? *bs->cur++ : 0;
 }
-
+ 
 inline __device__ void skip_bytes(byte_stream_s* bs, size_t bytecnt)
 {
   bytecnt = min(bytecnt, (size_t)(bs->end - bs->cur));
   bs->cur += bytecnt;
+}
+
+struct byte_stream_s_new {
+  uint8_t const* cur{};
+  uint8_t const* end{};
+  uint8_t const* base{};
+  // Parsed symbols
+  PageType page_type{};
+  PageInfo page{};
+  ColumnChunkDesc ck{};
+  
+  // Prefetch buffer (1KB shared memory cache)
+  static constexpr int prefetch_size = 256;
+  uint8_t* prefetch_buf{};
+  int prefetch_len{};
+  int prefetch_pos{};
+  uint8_t const* prefetch_base{};
+};
+
+/**
+ * @brief Prefetch next chunk into buffer (cooperative warp operation)
+ *
+ * @param bs Byte stream
+ */
+inline __device__ void prefetch_next_chunk(byte_stream_s_new* bs)
+{
+  auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+  auto const lane_id = warp.thread_rank();
+  auto const warp_size = warp.size();
+
+  auto const length_left = static_cast<int>(bs->end - bs->cur);
+  auto const new_base = bs->cur;
+  auto const new_len = min(length_left, byte_stream_s_new::prefetch_size);
+
+  //Make sure all threads are done reading from bs before we update it
+  warp.sync();
+
+  if (lane_id == 0) {
+    //printf("PREFETCH: length left: %d\n", length_left);
+    bs->prefetch_base = new_base;
+    bs->prefetch_len = new_len;
+  }
+  
+  // Cooperatively load data (all threads participate)
+  for (int i = lane_id; i < new_len; i += warp_size) {
+    bs->prefetch_buf[i] = new_base[i];
+  }
+  
+  warp.sync();
+}
+
+/**
+ * @brief Get current byte from the byte stream (uses prefetch buffer)
+ *
+ * Must be called by all threads in warp together for cooperative prefetching.
+ *
+ * @param bs Byte stream
+ *
+ * @return Current byte pointed to by the byte stream
+ */
+inline __device__ unsigned int getb(byte_stream_s_new* bs)
+{ 
+  // All threads advance pointer and read from shared buffer
+  auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+  auto const lane_id = warp.thread_rank();
+
+  if (bs->cur >= bs->end) {
+    return 0;
+  }
+  
+  // Check if we need to prefetch next chunk
+  auto offset = static_cast<int>(bs->cur - bs->prefetch_base);
+  if (offset < 0 || offset >= bs->prefetch_len) {
+    // All threads cooperatively prefetch
+    prefetch_next_chunk(bs);
+    offset = 0;
+  }
+
+  //Make sure all threads are done reading from bs before we update it
+  warp.sync();
+
+  if (lane_id == 0) {
+    //printf("OFFSET: %d, bs->prefetch_base: %p, bs->cur: %p\n", offset, bs->prefetch_base, bs->cur);
+    bs->cur++;
+  }
+  warp.sync();
+
+  return bs->prefetch_buf[offset];
+}
+
+inline __device__ void skip_bytes(byte_stream_s_new* bs, size_t bytecnt)
+{
+  bytecnt = min(bytecnt, (size_t)(bs->end - bs->cur));
+
+  auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+  auto const lane_id = warp.thread_rank();
+
+  //Make sure all threads are done reading from bs before we update it
+  warp.sync();
+  if (lane_id == 0) {
+    bs->cur += bytecnt;
+  }
+  warp.sync();
 }
 
 /**
@@ -72,7 +175,8 @@ inline __device__ void skip_bytes(byte_stream_s* bs, size_t bytecnt)
  *
  * @return Decoded 32 bit integer
  */
-__device__ uint32_t get_u32(byte_stream_s* bs)
+template <typename ByteStream>
+__device__ uint32_t get_u32(ByteStream* bs)
 {
   uint32_t v = 0, l = 0, c;
   do {
@@ -94,7 +198,8 @@ __device__ uint32_t get_u32(byte_stream_s* bs)
  *
  * @return Decoded 32 bit integer
  */
-inline __device__ int32_t get_i32(byte_stream_s* bs)
+template <typename ByteStream>
+inline __device__ int32_t get_i32(ByteStream* bs)
 {
   uint32_t u = get_u32(bs);
   return (int32_t)((u >> 1u) ^ -(int32_t)(u & 1));
@@ -106,7 +211,8 @@ inline __device__ int32_t get_i32(byte_stream_s* bs)
  * @param bs Byte stream
  * @param field_type Field type
  */
-__device__ void skip_struct_field(byte_stream_s* bs, int field_type)
+template <typename ByteStream>
+__device__ void skip_struct_field(ByteStream* bs, int field_type)
 {
   int struct_depth = 0;
   int rep_cnt      = 0;
@@ -276,9 +382,20 @@ struct ParquetFieldBool {
 
   __device__ ParquetFieldBool(int f, bool& v) : field(f), val(v) {}
 
-  inline __device__ bool operator()(byte_stream_s* bs, int field_type)
+  template <typename ByteStream>
+  inline __device__ bool operator()(ByteStream* bs, int field_type)
   {
-    val = static_cast<FieldType>(field_type) == FieldType::BOOLEAN_TRUE;
+    auto result = static_cast<FieldType>(field_type) == FieldType::BOOLEAN_TRUE;
+    // Only lane 0 writes for byte_stream_s_new (cooperative warp parsing)
+    // For byte_stream_s, every thread writes (single-threaded per page)
+    if constexpr (std::is_same_v<ByteStream, byte_stream_s_new>) {
+      auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+      if (warp.thread_rank() == 0) {
+        val = result;
+      }
+    } else {
+      val = result;
+    }
     return not(static_cast<FieldType>(field_type) == FieldType::BOOLEAN_TRUE or
                static_cast<FieldType>(field_type) == FieldType::BOOLEAN_FALSE);
   }
@@ -295,9 +412,20 @@ struct ParquetFieldInt32 {
 
   __device__ ParquetFieldInt32(int f, int32_t& v) : field(f), val(v) {}
 
-  inline __device__ bool operator()(byte_stream_s* bs, int field_type)
+  template <typename ByteStream>
+  inline __device__ bool operator()(ByteStream* bs, int field_type)
   {
-    val = get_i32(bs);
+    auto result = get_i32(bs);  // All threads call for convergence (byte_stream_s_new) or single thread (byte_stream_s)
+    // Only lane 0 writes for byte_stream_s_new (cooperative warp parsing)
+    // For byte_stream_s, every thread writes (single-threaded per page)
+    if constexpr (std::is_same_v<ByteStream, byte_stream_s_new>) {
+      auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+      if (warp.thread_rank() == 0) {
+        val = result;
+      }
+    } else {
+      val = result;
+    }
     return (static_cast<FieldType>(field_type) != FieldType::I32);
   }
 };
@@ -314,9 +442,20 @@ struct ParquetFieldEnum {
 
   __device__ ParquetFieldEnum(int f, Enum& v) : field(f), val(v) {}
 
-  inline __device__ bool operator()(byte_stream_s* bs, int field_type)
+  template <typename ByteStream>
+  inline __device__ bool operator()(ByteStream* bs, int field_type)
   {
-    val = static_cast<Enum>(get_i32(bs));
+    auto result = static_cast<Enum>(get_i32(bs));  // All threads call (byte_stream_s_new) or single thread (byte_stream_s)
+    // Only lane 0 writes for byte_stream_s_new (cooperative warp parsing)
+    // For byte_stream_s, every thread writes (single-threaded per page)
+    if constexpr (std::is_same_v<ByteStream, byte_stream_s_new>) {
+      auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+      if (warp.thread_rank() == 0) {
+        val = result;
+      }
+    } else {
+      val = result;
+    }
     return (static_cast<FieldType>(field_type) != FieldType::I32);
   }
 };
@@ -334,7 +473,8 @@ struct ParquetFieldStruct {
 
   __device__ ParquetFieldStruct(int f) : field(f) {}
 
-  inline __device__ bool operator()(byte_stream_s* bs, int field_type)
+  template <typename ByteStream>
+  inline __device__ bool operator()(ByteStream* bs, int field_type)
   {
     return ((static_cast<FieldType>(field_type) != FieldType::STRUCT) || !op(bs));
   }
@@ -355,8 +495,8 @@ struct ParquetFieldStruct {
  */
 template <int index>
 struct FunctionSwitchImpl {
-  template <typename... Operator>
-  static inline __device__ bool run(byte_stream_s* bs,
+  template <typename ByteStream, typename... Operator>
+  static inline __device__ bool run(ByteStream* bs,
                                     int field_type,
                                     int const& field,
                                     cuda::std::tuple<Operator...>& ops)
@@ -371,8 +511,8 @@ struct FunctionSwitchImpl {
 
 template <>
 struct FunctionSwitchImpl<0> {
-  template <typename... Operator>
-  static inline __device__ bool run(byte_stream_s* bs,
+  template <typename ByteStream, typename... Operator>
+  static inline __device__ bool run(ByteStream* bs,
                                     int field_type,
                                     int const& field,
                                     cuda::std::tuple<Operator...>& ops)
@@ -396,8 +536,8 @@ struct FunctionSwitchImpl<0> {
  * @return Returns false if an unexpected field is encountered while reading
  * byte stream. Otherwise true is returned.
  */
-template <typename... Operator>
-inline __device__ bool parse_header(cuda::std::tuple<Operator...>& op, byte_stream_s* bs)
+template <typename ByteStream, typename... Operator>
+inline __device__ bool parse_header(cuda::std::tuple<Operator...>& op, ByteStream* bs)
 {
   constexpr int index = cuda::std::tuple_size<cuda::std::tuple<Operator...>>::value - 1;
   int field           = 0;
@@ -421,7 +561,8 @@ inline __device__ bool parse_header(cuda::std::tuple<Operator...>& op, byte_stre
  * @return True if the data page header is parsed successfully
  */
 struct parse_data_page_header_fn {
-  __device__ bool operator()(byte_stream_s* bs)
+  template <typename ByteStream>
+  __device__ bool operator()(ByteStream* bs)
   {
     auto op =
       cuda::std::make_tuple(ParquetFieldInt32(1, bs->page.num_input_values),
@@ -440,7 +581,8 @@ struct parse_data_page_header_fn {
  * @return True if the dictionary page header is parsed successfully
  */
 struct parse_dictionary_page_header_fn {
-  __device__ bool operator()(byte_stream_s* bs)
+  template <typename ByteStream>
+  __device__ bool operator()(ByteStream* bs)
   {
     auto op = cuda::std::make_tuple(ParquetFieldInt32(1, bs->page.num_input_values),
                                     ParquetFieldEnum<Encoding>(2, bs->page.encoding));
@@ -456,7 +598,8 @@ struct parse_dictionary_page_header_fn {
  * @return True if the data page header V2 is parsed successfully
  */
 struct parse_data_page_header_v2_fn {
-  __device__ bool operator()(byte_stream_s* bs)
+  template <typename ByteStream>
+  __device__ bool operator()(ByteStream* bs)
   {
     auto op =
       cuda::std::make_tuple(ParquetFieldInt32(1, bs->page.num_input_values),
@@ -478,7 +621,8 @@ struct parse_data_page_header_v2_fn {
  * @return True if the page header is parsed successfully
  */
 struct parse_page_header_fn {
-  __device__ bool operator()(byte_stream_s* bs)
+  template <typename ByteStream>
+  __device__ bool operator()(ByteStream* bs)
   {
     auto op = cuda::std::make_tuple(ParquetFieldEnum<PageType>(1, bs->page_type),
                                     ParquetFieldInt32(2, bs->page.uncompressed_page_size),
@@ -495,7 +639,8 @@ struct parse_page_header_fn {
  *
  * @param bs Byte stream
  */
-void __forceinline__ __device__ zero_out_page_header_info(byte_stream_s* bs)
+template <typename ByteStream>
+void __forceinline__ __device__ zero_out_page_header_info(ByteStream* bs)
 {
   // this computation is only valid for flat schemas. for nested schemas,
   // they will be recomputed in the preprocess step by examining repetition and
@@ -547,104 +692,121 @@ void __launch_bounds__(decode_page_headers_block_size)
     static_cast<cudf::size_type>((cg::this_grid().block_rank() * num_warps_per_block) + warp_id);
   auto const num_chunks = static_cast<cudf::size_type>(chunks.size());
 
-  __shared__ byte_stream_s bs_g[num_warps_per_block];
+  __shared__ byte_stream_s_new bs_g[num_warps_per_block];
   __shared__ kernel_error::value_type error[num_warps_per_block];
+  __shared__ uint8_t prefetch_bufs[num_warps_per_block][byte_stream_s_new::prefetch_size];
 
   auto const bs = &bs_g[warp_id];
 
-  if (lane_id == 0) {
-    if (chunk_idx < num_chunks) { bs->ck = chunks[chunk_idx]; }
-    error[warp_id] = 0;
+  if (chunk_idx >= num_chunks) {
+    return;
   }
-  block.sync();
 
-  if (chunk_idx < num_chunks) {
-    if (lane_id == 0) {
-      bs->base = bs->cur      = bs->ck.compressed_data;
-      bs->end                 = bs->base + bs->ck.compressed_size;
-      bs->page.chunk_idx      = chunk_idx;
-      bs->page.src_col_schema = bs->ck.src_col_schema;
-      zero_out_page_header_info(bs);
-    }
-    size_t const num_values        = bs->ck.num_values;
-    size_t values_found            = 0;
-    uint32_t data_page_count       = 0;
-    uint32_t dictionary_page_count = 0;
-    auto* page_info                = chunk_pages[chunk_idx].pages;
-    auto const max_num_pages       = bs->ck.num_data_pages + bs->ck.num_dict_pages;
-    auto const num_dict_pages      = bs->ck.num_dict_pages;
+  if (lane_id == 0) {
+    bs->ck = chunks[chunk_idx];
+    error[warp_id] = 0;
+    bs->prefetch_buf = prefetch_bufs[warp_id];
+    bs->prefetch_len = 0;
+    bs->prefetch_pos = 0;
+    bs->base = bs->cur = bs->prefetch_base     = bs->ck.compressed_data;
+    bs->end                 = bs->base + bs->ck.compressed_size;
+    bs->page.chunk_idx      = chunk_idx;
+    bs->page.src_col_schema = bs->ck.src_col_schema;
+    zero_out_page_header_info(bs);
+  }
+  warp.sync();
+
+  size_t const num_values        = bs->ck.num_values;
+  size_t values_found            = 0;
+  uint32_t data_page_count       = 0;
+  uint32_t dictionary_page_count = 0;
+  auto* page_info                = chunk_pages[chunk_idx].pages;
+  auto const max_num_pages       = bs->ck.num_data_pages + bs->ck.num_dict_pages;
+  auto const num_dict_pages      = bs->ck.num_dict_pages;
+
+  while (values_found < num_values and bs->cur < bs->end) {
+    int index_out = -1;
+
+    //Make sure all threads are done reading from bs before we update it
     warp.sync();
 
-    while (values_found < num_values and bs->cur < bs->end) {
-      int index_out = -1;
-
-      if (lane_id == 0) {
-        // this computation is only valid for flat schemas. for nested schemas,
-        // they will be recomputed in the preprocess step by examining repetition and
-        // definition levels
-        bs->page.chunk_row += bs->page.num_rows;
-        bs->page.num_rows      = 0;
-        bs->page.flags         = 0;
-        bs->page.str_bytes     = 0;
-        bs->page.str_bytes_all = 0;
-        // zero out V2 info
-        bs->page.num_nulls                         = 0;
-        bs->page.lvl_bytes[level_type::DEFINITION] = 0;
-        bs->page.lvl_bytes[level_type::REPETITION] = 0;
-        if (parse_page_header_fn{}(bs) and bs->page.compressed_page_size >= 0) {
-          if (not is_supported_encoding(bs->page.encoding)) {
-            error[warp_id] |=
-              static_cast<kernel_error::value_type>(decode_error::UNSUPPORTED_ENCODING);
-          }
-          switch (bs->page_type) {
-            case PageType::DATA_PAGE:
-              index_out = num_dict_pages + data_page_count;
-              data_page_count++;
-              // this computation is only valid for flat schemas. for nested schemas,
-              // they will be recomputed in the preprocess step by examining repetition and
-              // definition levels
-              bs->page.num_rows = bs->page.num_input_values;
-              values_found += bs->page.num_input_values;
-              break;
-            case PageType::DATA_PAGE_V2:
-              index_out = num_dict_pages + data_page_count;
-              data_page_count++;
-              bs->page.flags |= PAGEINFO_FLAGS_V2;
-              values_found += bs->page.num_input_values;
-              // V2 only uses RLE, so it was removed from the header
-              bs->page.definition_level_encoding = Encoding::RLE;
-              bs->page.repetition_level_encoding = Encoding::RLE;
-              break;
-            case PageType::DICTIONARY_PAGE:
-              index_out = dictionary_page_count;
-              dictionary_page_count++;
-              bs->page.flags |= PAGEINFO_FLAGS_DICTIONARY;
-              break;
-            default:
-              error[warp_id] |=
-                static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_TYPE);
-              bs->cur = bs->end;
-              break;
-          }
-          bs->page.page_data = const_cast<uint8_t*>(bs->cur);
-          bs->cur += bs->page.compressed_page_size;
-          if (bs->cur > bs->end) {
-            error[warp_id] |=
-              static_cast<kernel_error::value_type>(decode_error::DATA_STREAM_OVERRUN);
-          }
-          bs->page.kernel_mask = kernel_mask_for_page(bs->page, bs->ck);
-        } else {
-          error[warp_id] |=
-            static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_HEADER);
-          bs->cur = bs->end;
-        }
-        if (index_out >= 0 and index_out < max_num_pages) { page_info[index_out] = bs->page; }
-      }
-      values_found = shuffle(values_found);
-      warp.sync();
+    if (lane_id == 0) {
+      // this computation is only valid for flat schemas. for nested schemas,
+      // they will be recomputed in the preprocess step by examining repetition and
+      // definition levels
+      bs->page.chunk_row += bs->page.num_rows;
+      bs->page.num_rows      = 0;
+      bs->page.flags         = 0;
+      bs->page.str_bytes     = 0;
+      bs->page.str_bytes_all = 0;
+      // zero out V2 info
+      bs->page.num_nulls                         = 0;
+      bs->page.lvl_bytes[level_type::DEFINITION] = 0;
+      bs->page.lvl_bytes[level_type::REPETITION] = 0;
     }
-    if (lane_id == 0 and error[warp_id] != 0) { set_error(error[warp_id], error_code); }
+    
+    warp.sync();
+    
+    // ALL threads call parse_page_header_fn for cooperative prefetching
+    bool parse_success = parse_page_header_fn{}(bs);
+    warp.sync();
+
+    // Only lane 0 processes results and writes output
+    if (lane_id == 0) {
+      if (parse_success and bs->page.compressed_page_size >= 0) {
+        if (not is_supported_encoding(bs->page.encoding)) {
+          error[warp_id] |=
+            static_cast<kernel_error::value_type>(decode_error::UNSUPPORTED_ENCODING);
+        }
+        switch (bs->page_type) {
+          case PageType::DATA_PAGE:
+            index_out = num_dict_pages + data_page_count;
+            data_page_count++;
+            // this computation is only valid for flat schemas. for nested schemas,
+            // they will be recomputed in the preprocess step by examining repetition and
+            // definition levels
+            bs->page.num_rows = bs->page.num_input_values;
+            values_found += bs->page.num_input_values;
+            break;
+          case PageType::DATA_PAGE_V2:
+            index_out = num_dict_pages + data_page_count;
+            data_page_count++;
+            bs->page.flags |= PAGEINFO_FLAGS_V2;
+            values_found += bs->page.num_input_values;
+            // V2 only uses RLE, so it was removed from the header
+            bs->page.definition_level_encoding = Encoding::RLE;
+            bs->page.repetition_level_encoding = Encoding::RLE;
+            break;
+          case PageType::DICTIONARY_PAGE:
+            index_out = dictionary_page_count;
+            dictionary_page_count++;
+            bs->page.flags |= PAGEINFO_FLAGS_DICTIONARY;
+            break;
+          default:
+            error[warp_id] |=
+              static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_TYPE);
+            bs->cur = bs->end;
+            break;
+        }
+        bs->page.page_data = const_cast<uint8_t*>(bs->cur);
+        bs->cur += bs->page.compressed_page_size;
+        if (bs->cur > bs->end) {
+          error[warp_id] |=
+            static_cast<kernel_error::value_type>(decode_error::DATA_STREAM_OVERRUN);
+        }
+        bs->page.kernel_mask = kernel_mask_for_page(bs->page, bs->ck);
+      } else {
+        error[warp_id] |=
+          static_cast<kernel_error::value_type>(decode_error::INVALID_PAGE_HEADER);
+        bs->cur = bs->end;
+      }
+      if (index_out >= 0 and index_out < max_num_pages) { page_info[index_out] = bs->page; }
+    }
+    warp.sync();
+    values_found = shuffle(values_found);
+    warp.sync();
   }
+  if (lane_id == 0 and error[warp_id] != 0) { set_error(error[warp_id], error_code); }
 }
 
 /**
