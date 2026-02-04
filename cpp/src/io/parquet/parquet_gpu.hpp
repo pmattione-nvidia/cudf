@@ -698,12 +698,12 @@ void count_page_headers(cudf::detail::hostdevice_span<ColumnChunkDesc> chunks,
 /**
  * @brief Launches kernel for parsing the page headers in the column chunks
  *
- * @param[in] chunks Device span of column chunks
+ * @param[in] chunks Hostdevice span of column chunks
  * @param[in] chunk_pages List of pages associated with the chunks, in chunk-sorted order
  * @param[out] error_code Error code for kernel failures
  * @param[in] stream CUDA stream to use
  */
-void decode_page_headers(cudf::device_span<ColumnChunkDesc const> chunks,
+void decode_page_headers(cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
                          chunk_page_info* chunk_pages,
                          kernel_error::pointer error_code,
                          rmm::cuda_stream_view stream);
