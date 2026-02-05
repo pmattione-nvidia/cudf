@@ -70,8 +70,8 @@ struct byte_stream_s_new {
   PageInfo page{};
   ColumnChunkDesc ck{};
   
-  // Prefetch buffer (1KB shared memory cache)
-  static constexpr int prefetch_size = 256;
+  // Prefetch buffer
+  static constexpr int prefetch_size = 32;
   uint8_t* prefetch_buf{};
   int prefetch_len{};
   int prefetch_pos{};
@@ -85,9 +85,9 @@ struct byte_stream_s_new {
  */
 inline __device__ void prefetch_next_chunk(byte_stream_s_new* bs)
 {
-  auto const warp = cg::tiled_partition<cudf::detail::warp_size>(cg::this_thread_block());
+  auto const warp_size = cudf::detail::warp_size;
+  auto const warp = cg::tiled_partition<warp_size>(cg::this_thread_block());
   auto const lane_id = warp.thread_rank();
-  auto const warp_size = warp.size();
 
   auto const length_left = static_cast<int>(bs->end - bs->cur);
   auto const new_base = bs->cur;
@@ -101,12 +101,28 @@ inline __device__ void prefetch_next_chunk(byte_stream_s_new* bs)
     bs->prefetch_base = new_base;
     bs->prefetch_len = new_len;
   }
-  
-  // Cooperatively load data (all threads participate)
-  for (int i = lane_id; i < new_len; i += warp_size) {
-    bs->prefetch_buf[i] = new_base[i];
+/*
+  if (lane_id < new_len) {
+    bs->prefetch_buf[lane_id] = new_base[lane_id];
+  }*/
+
+  // Nominally, each thread will copy an equal number of bytes; this rounds up.
+  auto const nominal_thread_bytes_to_copy = 4;
+//    cudf::util::div_rounding_up_unsafe<int32_t>(new_len, warp_size);
+  int32_t const thread_offset = nominal_thread_bytes_to_copy * lane_id;
+
+  if (thread_offset < new_len) {
+    // Guard against the end of the data stream
+    int32_t const thread_bytes_to_copy =
+      cuda::std::min(nominal_thread_bytes_to_copy, new_len - thread_offset);
+
+    if (thread_bytes_to_copy > 0) {
+      cuda::std::memcpy(reinterpret_cast<void*>(&bs->prefetch_buf[thread_offset]),
+                        reinterpret_cast<const void*>(&new_base[thread_offset]),
+                        thread_bytes_to_copy);
+    }
   }
-  
+
   warp.sync();
 }
 
@@ -692,9 +708,9 @@ void __launch_bounds__(decode_page_headers_block_size)
     static_cast<cudf::size_type>((cg::this_grid().block_rank() * num_warps_per_block) + warp_id);
   auto const num_chunks = static_cast<cudf::size_type>(chunks.size());
 
-  __shared__ byte_stream_s_new bs_g[num_warps_per_block];
-  __shared__ kernel_error::value_type error[num_warps_per_block];
-  __shared__ uint8_t prefetch_bufs[num_warps_per_block][byte_stream_s_new::prefetch_size];
+  __shared__ __align__(16) byte_stream_s_new bs_g[num_warps_per_block];
+  __shared__ __align__(16) kernel_error::value_type error[num_warps_per_block];
+  __shared__ __align__(16) uint8_t prefetch_bufs[num_warps_per_block][byte_stream_s_new::prefetch_size];
 
   auto const bs = &bs_g[warp_id];
 
@@ -830,9 +846,9 @@ CUDF_KERNEL void __launch_bounds__(count_page_headers_block_size)
     static_cast<cudf::size_type>((cg::this_grid().block_rank() * num_warps_per_block) + warp_id);
   auto const num_chunks = static_cast<cudf::size_type>(chunks.size());
 
-  __shared__ byte_stream_s_new bs_g[num_warps_per_block];
-  __shared__ kernel_error::value_type error[num_warps_per_block];
-  __shared__ uint8_t prefetch_bufs[num_warps_per_block][byte_stream_s_new::prefetch_size];
+  __shared__ __align__(16) byte_stream_s_new bs_g[num_warps_per_block];
+  __shared__ __align__(16) kernel_error::value_type error[num_warps_per_block];
+  __shared__ __align__(16) uint8_t prefetch_bufs[num_warps_per_block][byte_stream_s_new::prefetch_size];
 
   auto const bs = &bs_g[warp_id];
 
