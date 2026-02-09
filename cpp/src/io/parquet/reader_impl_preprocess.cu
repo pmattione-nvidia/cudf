@@ -269,6 +269,7 @@ void reader_impl::allocate_level_decode_space()
 
   std::vector<size_t> def_level_sizes(num_pages);
   std::vector<size_t> rep_level_sizes(num_pages);
+  std::vector<size_t> nz_idx_sizes(num_pages);
 
   // Loop over pages to compute sizes
   size_t total_memory_size = 0;
@@ -283,23 +284,38 @@ void reader_impl::allocate_level_decode_space()
     auto const& p     = pages[idx];
     auto const& chunk = pass.chunks[p.chunk_idx];
 
-    compute_page_level_decode_sizes(p,
-                                    chunk,
-                                    pass.level_type_size,
-                                    pass.skip_rows,
-                                    pass.num_rows,
-                                    def_level_sizes[idx],
-                                    rep_level_sizes[idx]);
+    // Determine how many values need to be decoded using the common helper
+    size_t const num_to_decode =
+      precompute_page_num_values_in_range(p, chunk, pass.skip_rows, pass.num_rows);
+    nz_idx_sizes[idx] = num_to_decode * sizeof(int32_t);
 
-    total_memory_size += def_level_sizes[idx] + rep_level_sizes[idx];
+    bool const has_repetition = chunk.max_level[level_type::REPETITION] > 0;
+    if (has_repetition) {
+      rep_level_sizes[idx] = nz_idx_sizes[idx] * pass.level_type_size;
+    }
+
+    bool const has_definition = chunk.max_level[level_type::DEFINITION] > 0;
+    if (has_definition) {
+      def_level_sizes[idx] = nz_idx_sizes[idx] * pass.level_type_size;
+    }
+
+    total_memory_size += def_level_sizes[idx] + rep_level_sizes[idx] + nz_idx_sizes[idx];
   }
 
   // Allocate the total buffer
+  printf("ALLOCATING %zu bytes for level decode data\n", total_memory_size);
   subpass.level_decode_data =
     rmm::device_buffer(total_memory_size, _stream, cudf::get_current_device_resource_ref());
 
   // Set buffer pointers for each page using running offsets
+  // Must do first to ensure correct alignment of nz_idx_buf
   auto* current_ptr = static_cast<uint8_t*>(subpass.level_decode_data.data());
+  for (size_t idx = 0; idx < num_pages; idx++) {
+    pages[idx].nz_idx_buf = reinterpret_cast<int32_t*>(current_ptr);
+    current_ptr += nz_idx_sizes[idx];
+  }
+
+  // Set buffer pointers for each page using running offsets
   for (size_t idx = 0; idx < num_pages; idx++) {
     if (def_level_sizes[idx] == 0) {
       pages[idx].lvl_decode_buf[level_type::DEFINITION] = nullptr;

@@ -196,6 +196,58 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   // create this before we fork streams
   kernel_error error_code(_stream);
 
+  // Check which variants we need to launch
+  bool const has_flat = (BitAnd(kernel_mask, FLAT_MASK) != 0);
+  bool const has_nested_only = (BitAnd(kernel_mask, NESTED_MASK) != 0);
+  bool const has_lists = (BitAnd(kernel_mask, LISTS_MASK) != 0);
+
+  // Launch decode_validity_and_row_indices variants in parallel on separate streams
+  int const nvalidity_streams = (has_flat ? 1 : 0) + (has_nested_only ? 1 : 0) + (has_lists ? 1 : 0);
+  auto validity_streams = nvalidity_streams > 0 ? cudf::detail::fork_streams(_stream, nvalidity_streams) : std::vector<rmm::cuda_stream_view>{};
+  int validity_stream_idx = 0;
+
+  if (has_flat) {
+    detail::decode_validity_and_row_indices(subpass.pages,
+                                            pass.chunks,
+                                            num_rows,
+                                            skip_rows,
+                                            level_type_size,
+                                            false,  // has_nesting
+                                            false,  // has_lists
+                                            _subpass_page_mask,
+                                            error_code.data(),
+                                            validity_streams[validity_stream_idx++]);
+  }
+  if (has_nested_only) {
+    detail::decode_validity_and_row_indices(subpass.pages,
+                                            pass.chunks,
+                                            num_rows,
+                                            skip_rows,
+                                            level_type_size,
+                                            true,   // has_nesting
+                                            false,  // has_lists
+                                            _subpass_page_mask,
+                                            error_code.data(),
+                                            validity_streams[validity_stream_idx++]);
+  }
+  if (has_lists) {
+    detail::decode_validity_and_row_indices(subpass.pages,
+                                            pass.chunks,
+                                            num_rows,
+                                            skip_rows,
+                                            level_type_size,
+                                            false,  // has_nesting
+                                            true,   // has_lists
+                                            _subpass_page_mask,
+                                            error_code.data(),
+                                            validity_streams[validity_stream_idx++]);
+  }
+
+  // Sync validity streams before proceeding
+  if (nvalidity_streams > 0) {
+    cudf::detail::join_streams(validity_streams, _stream);
+  }
+
   // get the number of streams we need from the pool and tell them to wait on the H2D copies
   int const nkernels = std::bitset<32>(kernel_mask).count();
   auto streams       = cudf::detail::fork_streams(_stream, nkernels);

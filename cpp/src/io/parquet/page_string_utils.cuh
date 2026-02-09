@@ -241,6 +241,7 @@ template <int block_size,
           typename state_buf>
 __device__ size_t decode_strings(page_state_s* s,
                                  state_buf* const sb,
+                                 int32_t* nz_idx_buf,
                                  int start,
                                  int end,
                                  int t,
@@ -266,7 +267,7 @@ __device__ size_t decode_strings(page_state_s* s,
       if constexpr (copy_mode_t == copy_mode::DIRECT) {
         return thread_pos - s->first_row;
       } else {
-        int dst_pos = sb->nz_idx[rolling_index<state_buf::nz_buf_size>(thread_pos)];
+        int dst_pos = nz_idx_buf[thread_pos];
         if constexpr (!has_lists_t) { dst_pos -= s->first_row; }
         return dst_pos;
       }

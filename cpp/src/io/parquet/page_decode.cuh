@@ -1036,6 +1036,7 @@ enum class page_processing_stage {
   PREPROCESS,
   STRING_BOUNDS,
   DECODE,
+  FILL_DATA
 };
 
 /**
@@ -1132,7 +1133,9 @@ inline __device__ bool setup_local_page_info(page_state_s* const s,
     if (thread_depth < s->page.num_output_nesting_levels) {
       s->nesting_info[thread_depth].valid_count = 0;
       s->nesting_info[thread_depth].value_count = 0;
-      s->nesting_info[thread_depth].null_count  = 0;
+      if (stage != page_processing_stage::FILL_DATA) {
+        s->nesting_info[thread_depth].null_count  = 0;
+      }
     }
     depth += blockDim.x;
   }
@@ -1150,7 +1153,7 @@ inline __device__ bool setup_local_page_info(page_state_s* const s,
   //
   // NOTE: this check needs to be done after the null counts have been zeroed out
   bool const has_repetition = s->col.max_level[level_type::REPETITION] > 0;
-  if ((stage == page_processing_stage::STRING_BOUNDS || stage == page_processing_stage::DECODE) &&
+  if ((stage == page_processing_stage::STRING_BOUNDS || stage == page_processing_stage::DECODE || stage == page_processing_stage::FILL_DATA) &&
       s->num_rows == 0 &&
       !(has_repetition && (is_bounds_page(s, min_row, num_rows, has_repetition) ||
                            is_page_contained(s, min_row, num_rows)))) {
@@ -1264,7 +1267,7 @@ inline __device__ bool setup_local_page_info(page_state_s* const s,
       // NOTE: in a chunked read situation, s->col.column_data_base and s->col.valid_map_base
       // will be aliased to memory that has been freed when we get here in the non-decode step, so
       // we cannot check against nullptr.  we'll just check a flag directly.
-      if (stage == page_processing_stage::DECODE) {
+      if ((stage == page_processing_stage::DECODE) || (stage == page_processing_stage::FILL_DATA)) {
         int max_depth = s->col.max_nesting_depth;
         for (int idx = 0; idx < max_depth; idx++) {
           PageNestingDecodeInfo* nesting_info = &s->nesting_info[idx];
@@ -1419,7 +1422,7 @@ inline __device__ bool setup_local_page_info(page_state_s* const s,
 
       // if we're in the decoding step, jump directly to the first
       // value we care about
-      if (stage == page_processing_stage::DECODE) {
+      if ((stage == page_processing_stage::DECODE) || (stage == page_processing_stage::FILL_DATA)) {
         s->input_value_count = s->page.skipped_values > -1 ? s->page.skipped_values : 0;
       } else if (stage == page_processing_stage::PREPROCESS) {
         s->input_value_count = 0;

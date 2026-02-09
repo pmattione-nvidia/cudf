@@ -239,6 +239,32 @@ constexpr uint32_t STRINGS_MASK = BitOr(decode_kernel_mask::DELTA_BYTE_ARRAY,
                                         decode_kernel_mask::DELTA_LENGTH_BA,
                                         STRINGS_MASK_NON_DELTA);
 
+
+// Bit masks for different column types (matching decode_fixed.cu)
+constexpr uint32_t FLAT_MASK = BitOr(decode_kernel_mask::FIXED_WIDTH_NO_DICT,
+                                     decode_kernel_mask::FIXED_WIDTH_DICT,
+                                     decode_kernel_mask::BYTE_STREAM_SPLIT_FIXED_WIDTH_FLAT,
+                                     decode_kernel_mask::BOOLEAN,
+                                     decode_kernel_mask::STRING,
+                                     decode_kernel_mask::STRING_DICT,
+                                     decode_kernel_mask::STRING_STREAM_SPLIT);
+
+constexpr uint32_t NESTED_MASK = BitOr(decode_kernel_mask::BOOLEAN_NESTED,
+                                       decode_kernel_mask::FIXED_WIDTH_DICT_NESTED,
+                                       decode_kernel_mask::FIXED_WIDTH_NO_DICT_NESTED,
+                                       decode_kernel_mask::BYTE_STREAM_SPLIT_FIXED_WIDTH_NESTED,
+                                       decode_kernel_mask::STRING_NESTED,
+                                       decode_kernel_mask::STRING_DICT_NESTED,
+                                       decode_kernel_mask::STRING_STREAM_SPLIT_NESTED);
+
+constexpr uint32_t LISTS_MASK = BitOr(decode_kernel_mask::BOOLEAN_LIST,
+                                      decode_kernel_mask::FIXED_WIDTH_DICT_LIST,
+                                      decode_kernel_mask::FIXED_WIDTH_NO_DICT_LIST,
+                                      decode_kernel_mask::BYTE_STREAM_SPLIT_FIXED_WIDTH_LIST,
+                                      decode_kernel_mask::STRING_LIST,
+                                      decode_kernel_mask::STRING_DICT_LIST,
+                                      decode_kernel_mask::STRING_STREAM_SPLIT_LIST);
+
 /**
  * @brief Nesting information specifically needed by the decode and preprocessing
  * kernels.
@@ -364,6 +390,9 @@ struct PageInfo {
 
   // level decode buffers
   uint8_t* lvl_decode_buf[level_type::NUM_LEVEL_TYPES];  // NOLINT
+  int32_t* nz_idx_buf;
+  int32_t num_valids_skipped;
+  int32_t num_valids_processed;
 
   // temporary space for decoding DELTA_BYTE_ARRAY encoded strings
   int64_t temp_string_size;
@@ -1036,6 +1065,31 @@ void decode_page_data(cudf::detail::hostdevice_span<PageInfo> pages,
                       cudf::device_span<size_t const> page_string_offset_indices,
                       kernel_error::pointer error_code,
                       rmm::cuda_stream_view stream);
+
+/**
+ * @brief Launches kernel for decoding validity and row indices for a specific variant
+ *
+ * @param[in,out] pages All pages to be decoded
+ * @param[in] chunks All chunks to be decoded
+ * @param[in] num_rows Total number of rows to read
+ * @param[in] min_row Minimum number of rows to read
+ * @param[in] level_type_size Size in bytes of the type for level decoding
+ * @param[in] has_nesting Whether this is the nested variant
+ * @param[in] has_lists Whether this is the list variant
+ * @param[in] page_mask Boolean vector indicating which pages need to be decoded
+ * @param[out] error_code Error code for kernel failures
+ * @param[in] stream CUDA stream to use
+ */
+void decode_validity_and_row_indices(cudf::detail::hostdevice_span<PageInfo> pages,
+                                     cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+                                     size_t num_rows,
+                                     size_t min_row,
+                                     int level_type_size,
+                                     bool has_nesting,
+                                     bool has_lists,
+                                     cudf::device_span<bool const> page_mask,
+                                     kernel_error::pointer error_code,
+                                     rmm::cuda_stream_view stream);
 
 /**
  * @brief Launches kernel for initializing encoder row group fragments
