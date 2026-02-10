@@ -393,6 +393,8 @@ struct PageInfo {
   int32_t* nz_idx_buf;
   int32_t num_valids_skipped;
   int32_t num_valids_processed;
+  int32_t num_values_processed;
+  int32_t max_depth_valid_map_offset;
 
   // temporary space for decoding DELTA_BYTE_ARRAY encoded strings
   int64_t temp_string_size;

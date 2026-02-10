@@ -324,7 +324,7 @@ __device__ int skip_validity_and_row_indices_nonlist(
  *
  * @return Maximum depth valid count after processing
  */
-template <bool full_pass_t, int decode_block_size, typename level_t>
+template <int decode_block_size, typename level_t>
 __device__ int update_validity_and_row_indices_nested(
   int32_t target_value_count, page_state_s* s, int32_t* nz_idx_buf, level_t const* const def, int t)
 {
@@ -390,7 +390,7 @@ __device__ int update_validity_and_row_indices_nested(
           int const valid_map_offset = ni.valid_map_offset;
           int const vindex     = value_count + thread_value_count;  // absolute input value index
           int const bit_offset = (valid_map_offset + vindex + write_start) -
-                                 first_row;  // absolute bit offset into the output validity map
+                                first_row;  // absolute bit offset into the output validity map
           int const write_end = cudf::detail::warp_size -
                                 __clz(in_write_row_bounds_mask);  // last bit in the warp to store
           int const bit_count = write_end - write_start;
@@ -399,18 +399,14 @@ __device__ int update_validity_and_row_indices_nested(
         }
       }
 
-      if constexpr (full_pass_t) {
-        if (t == 0) { ni.null_count += (block_value_count - block_valid_count); }
-      }
+      if (t == 0) { ni.null_count += (block_value_count - block_valid_count); }
 
       // if this is valid and we're at the leaf, output dst_pos
       if (d_idx == max_depth) {
-        if constexpr (full_pass_t) {
-          if (is_valid) {
-            int const dst_pos = value_count + thread_value_count;
-            int const src_pos = max_depth_valid_count + thread_valid_count;
-            nz_idx_buf[src_pos] = dst_pos;
-          }
+        if (is_valid) {
+          int const dst_pos = value_count + thread_value_count;
+          int const src_pos = max_depth_valid_count + thread_valid_count;
+          nz_idx_buf[src_pos] = dst_pos;
         }
         // update stuff
         max_depth_valid_count += block_valid_count;
@@ -425,7 +421,6 @@ __device__ int update_validity_and_row_indices_nested(
     // update valid value count for decoding and total # of values we've processed
     max_depth_ni.valid_count = max_depth_valid_count;
     max_depth_ni.value_count = value_count;  // Needed AT LEAST for strings!
-    s->nz_count              = max_depth_valid_count;
     s->input_value_count     = value_count;
     s->input_row_count       = value_count;
   }
@@ -448,8 +443,8 @@ __device__ int update_validity_and_row_indices_nested(
  *
  * @return Maximum depth valid count after processing
  */
-template <bool full_pass_t, int decode_block_size, typename level_t>
-__device__ int update_validity_and_row_indices_flat(
+template <int decode_block_size, typename level_t>
+__device__ cuda::std::pair<int, int> update_validity_and_row_indices_flat(
   int32_t target_value_count, page_state_s* s, int32_t* nz_idx_buf, level_t const* const def, int t)
 {
   constexpr int num_warps      = decode_block_size / cudf::detail::warp_size;
@@ -491,6 +486,7 @@ __device__ int update_validity_and_row_indices_flat(
     __shared__ typename block_scan::TempStorage scan_storage;
     int thread_valid_count, block_valid_count;
     block_scan(scan_storage).ExclusiveSum(is_valid, thread_valid_count, block_valid_count);
+
     uint32_t const warp_validity_mask = ballot(is_valid);
 
     // validity is processed per-warp
@@ -508,7 +504,7 @@ __device__ int update_validity_and_row_indices_flat(
     if ((write_start >= 0) && ((t % cudf::detail::warp_size) == 0)) {
       int const vindex     = value_count + thread_value_count;  // absolute input value index
       int const bit_offset = (valid_map_offset + vindex + write_start) -
-                             first_row;  // absolute bit offset into the output validity map
+                            first_row;  // absolute bit offset into the output validity map
       int const write_end =
         cudf::detail::warp_size - __clz(in_write_row_bounds_mask);  // last bit in the warp to store
       int const bit_count = write_end - write_start;
@@ -516,17 +512,13 @@ __device__ int update_validity_and_row_indices_flat(
       store_validity(bit_offset, ni.valid_map, warp_validity_mask >> write_start, bit_count);
     }
 
-    if constexpr (full_pass_t) {
-      if (t == 0) { ni.null_count += block_value_count - block_valid_count; }
-    }
+    if (t == 0) { ni.null_count += block_value_count - block_valid_count; }
 
     // output offset
-    if constexpr (full_pass_t) {
-      if (is_valid) {
-        int const dst_pos = value_count + thread_value_count;
-        int const src_pos = valid_count + thread_valid_count;
-        nz_idx_buf[src_pos] = dst_pos;
-      }
+    if (is_valid) {
+      int const dst_pos = value_count + thread_value_count;
+      int const src_pos = valid_count + thread_valid_count;
+      nz_idx_buf[src_pos] = dst_pos;
     }
 
     // update stuff
@@ -538,12 +530,11 @@ __device__ int update_validity_and_row_indices_flat(
     // update valid value count for decoding and total # of values we've processed
     ni.valid_count       = valid_count;
     ni.value_count       = value_count;
-    s->nz_count          = valid_count;
     s->input_value_count = value_count;
     s->input_row_count   = value_count;
   }
 
-  return valid_count;
+  return cuda::std::make_pair(value_count, valid_count);
 }
 
 /**
@@ -561,8 +552,8 @@ __device__ int update_validity_and_row_indices_flat(
  *
  * @return Maximum depth valid count after processing
  */
-template <bool full_pass_t, int decode_block_size, bool nullable, typename level_t>
-__device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
+template <int decode_block_size, bool nullable, typename level_t>
+__device__ cuda::std::pair<int, int> update_validity_and_row_indices_lists(int32_t target_value_count,
                                                      page_state_s* s,
                                                      int32_t* nz_idx_buf,
                                                      level_t const* const def,
@@ -585,6 +576,7 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
   int const row_index_lower_bound = s->row_index_lower_bound;
   int const max_depth             = s->col.max_nesting_depth - 1;
   int max_depth_valid_count       = s->nesting_info[max_depth].valid_count;
+  int max_depth_value_count       = s->nesting_info[max_depth].value_count;
 
   int const warp_index     = t / cudf::detail::warp_size;
   int const warp_lane      = t % cudf::detail::warp_size;
@@ -735,9 +727,7 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
           store_validity(bit_offset, ni.valid_map, warp_valid_mask, warp_value_count);
         }
 
-        if constexpr (full_pass_t) {
-          if (t == 0) { ni.null_count += block_value_count - block_valid_count; }
-        }
+        if (t == 0) { ni.null_count += block_value_count - block_valid_count; }
       }
 
       // if this is valid and we're at the leaf, output dst_pos
@@ -746,23 +736,22 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
       int const current_value_count = ni.value_count;
       __syncthreads();  // guard against modification of ni.value_count below
       if (d_idx == max_depth) {
-        if constexpr (full_pass_t) {
-          if (is_valid) {
-            int const dst_pos      = current_value_count + thread_value_count;
-            int const src_pos      = max_depth_valid_count + thread_valid_count;
+        if (is_valid) {
+          int const dst_pos      = current_value_count + thread_value_count;
+          int const src_pos      = max_depth_valid_count + thread_valid_count;
 
-            // Index from rolling buffer of values (which doesn't include nulls) to final array (which
-            // includes gaps for nulls)
-            nz_idx_buf[src_pos] = dst_pos;
-          }
+          // Index from rolling buffer of values (which doesn't include nulls) to final array (which
+          // includes gaps for nulls)
+          nz_idx_buf[src_pos] = dst_pos;
         }
         max_depth_valid_count += block_valid_count;
+        max_depth_value_count += block_value_count;
       }
 
       // update stuff
       if (t == 0) {
-        ni.value_count += block_value_count;
-        ni.valid_map_offset += block_value_count;
+        ni.value_count += block_value_count; //bad if skipped
+        ni.valid_map_offset += block_value_count; //OK to skip
       }
       __syncthreads();  // sync modification of ni.value_count
 
@@ -781,14 +770,13 @@ __device__ int update_validity_and_row_indices_lists(int32_t target_value_count,
   if (t == 0) {
     // update valid value count for decoding and total # of values we've processed
     s->nesting_info[max_depth].valid_count = max_depth_valid_count;
-    s->nz_count                            = max_depth_valid_count;
-    s->input_value_count                   = value_count;
+    s->input_value_count                   = value_count; //CANNOT SKIP, REMAINS HERE
 
     // If we have lists # rows != # values
     s->input_row_count = input_row_count;
   }
 
-  return max_depth_valid_count;
+  return cuda::std::make_pair(max_depth_value_count, max_depth_valid_count);
 }
 
 template <typename state_buf, typename thread_group>
@@ -892,7 +880,6 @@ __device__ void skip_ahead_in_decoding(page_state_s* s,
     // update valid value count for decoding and total # of values we've processed
     ni.valid_count       = valid_count;
     ni.value_count       = processed_count;
-    s->nz_count          = valid_count;
     s->input_value_count = processed_count;
     s->input_row_count   = processed_count;
   }
@@ -942,7 +929,6 @@ __device__ void skip_ahead_in_decoding_levels(page_state_s* s,
     // update valid value count for decoding and total # of values we've processed
     ni.valid_count       = valid_count;
     ni.value_count       = processed_count;
-    s->nz_count          = valid_count;
     s->input_value_count = processed_count;
     s->input_row_count   = processed_count;
   }
@@ -1116,8 +1102,6 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   auto bool_runs = reinterpret_cast<rle_run*>(shared_buf + shared_offset);
 
   // get the level data
-  auto* const def = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::DEFINITION]);
-  auto* const rep = reinterpret_cast<level_t*>(pp->lvl_decode_buf[level_type::REPETITION]);
   auto* const nz_idx_buf = pp->nz_idx_buf;
 
   rle_stream<uint32_t, decode_block_size_t, rolling_buf_size> dict_stream{dict_runs};
@@ -1157,49 +1141,11 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   // the core loop. decode batches of level stream data using rle_stream objects
   // and pass the results to decode_values
   // For chunked reads we may not process all of the rows on the page; if not stop early
-  int const first_row = s->first_row;
-  int const last_row  = first_row + s->num_rows;
-  //auto const total_valids = s->page.num_valids_processed;
-  while ((s->error == 0) && (processed_count < s->page.num_input_values) &&
-         (s->input_row_count <= last_row)) {
-    int next_valid_count;
+  auto const total_valids = s->page.num_valids_processed;
+  while ((s->error == 0) && (valid_count < total_valids)) {
     block.sync();
-    processed_count += min(rolling_buf_size, s->page.num_input_values - processed_count);
-    //int const num_to_decode = min(rolling_buf_size, total_valids - valid_count);
-    //int const next_valid_count = valid_count + num_to_decode;
-
-    // only need to process definition levels if this is a nullable column
-    if (process_nulls) {
-      if constexpr (has_lists_t) {
-        next_valid_count =
-          update_validity_and_row_indices_lists<false, decode_block_size_t, true, level_t>(
-            processed_count, s, nz_idx_buf, def, rep, t);
-      } else if constexpr (has_nesting_t) {
-        next_valid_count = update_validity_and_row_indices_nested<false, decode_block_size_t, level_t>(
-          processed_count, s, nz_idx_buf, def, t);
-      } else {
-        next_valid_count = update_validity_and_row_indices_flat<false, decode_block_size_t, level_t>(
-          processed_count, s, nz_idx_buf, def, t);
-      }
-    }
-    // if we wanted to split off the skip_rows/num_rows case into a separate kernel, we could skip
-    // this function call entirely since all it will ever generate is a mapping of (i -> i) for
-    // nz_idx.  decode_fixed_width_values would be the only work that happens.
-    else {
-      if constexpr (has_lists_t) {
-        next_valid_count =
-          update_validity_and_row_indices_lists<false, decode_block_size_t, false, level_t>(
-            processed_count, s, nz_idx_buf, nullptr, rep, t);
-      } else {
-        // direct copy: no nulls, no lists, no need to update validity or row indices
-        // This ASSUMES that s->row_index_lower_bound is always -1!
-        // Its purpose is to handle rows than span page boundaries, which only happen for lists.
-        int const capped_target_value_count = min(processed_count, last_row);
-        if (t == 0) { s->input_row_count = capped_target_value_count; }
-        next_valid_count = capped_target_value_count;
-      }
-    }
-    block.sync();
+    int const num_to_decode = min(rolling_buf_size, total_valids - valid_count);
+    int next_valid_count = valid_count + num_to_decode;
 
     // We want to limit the number of dictionary/bool/string items we decode,
     // that correspond to the rows we have processed in this iteration that are valid.
@@ -1246,13 +1192,13 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
   }
 
   // Zero-fill null positions after decoding valid values
+//ASSUMES: ni.valid_map_offset UPDATED FOR LISTS (must store!), 
   if constexpr (has_strings_t || has_lists_t) {
     if (process_nulls) {
       uint32_t const dtype_len = has_strings_t ? sizeof(cudf::size_type) : s->dtype_len;
       int const num_values     = [&]() {
         if constexpr (has_lists_t) {
-          auto const& ni = s->nesting_info[s->col.max_nesting_depth - 1];
-          return ni.valid_map_offset - init_valid_map_offset;
+          return pp->max_depth_valid_map_offset - init_valid_map_offset;
         } else {
           return s->num_rows;
         }
@@ -1261,19 +1207,16 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
         s, dtype_len, init_valid_map_offset, num_values, t);
     }
   }
-
+//ASSUMES: Max nesting depth value_count set
   if constexpr (has_strings_t) {
     // For large strings, update the initial string buffer offset to be used during large string
     // column construction. Otherwise, convert string sizes to final offsets.
 
-    if constexpr (!has_lists_t) {
-      if (!process_nulls) {
-        if (t == 0) {
-          s->nesting_info[s->col.max_nesting_depth - 1].value_count = s->input_row_count;
-        }
-        block.sync();
-      }
+    if (t == 0) {
+      auto& ni = s->nesting_info[s->col.max_nesting_depth - 1];
+      ni.value_count       = pp->num_values_processed;
     }
+    block.sync();
 
     if (s->col.is_large_string_col) {
       // page.chunk_idx are ordered by input_col_idx and row_group_idx respectively.
@@ -1284,7 +1227,7 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
       convert_small_string_lengths_to_offsets<decode_block_size_t, has_lists_t>(s);
     }
   }
-
+  
   if (t == 0 and s->error != 0) { set_error(s->error, error_code); }
 }
 
@@ -1302,7 +1245,6 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
  * @param min_row Row index to start reading at
  * @param num_rows Maximum number of rows to read
  * @param page_mask Boolean vector indicating which pages need to be decoded
- * string offset buffer
  * @param error_code Error code to set if an error is encountered
  */
 template <typename level_t, int decode_block_size_t, bool has_nesting_t, bool has_lists_t>
@@ -1387,16 +1329,18 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
     processed_count += min(rolling_buf_size, s->page.num_input_values - processed_count);
 
     // only need to process definition levels if this is a nullable column
+    int max_depth_value_count;
     if (process_nulls) {
       if constexpr (has_lists_t) {
-        next_valid_count =
-          update_validity_and_row_indices_lists<true, decode_block_size_t, true, level_t>(
+        cuda::std::tie(max_depth_value_count, next_valid_count) =
+          update_validity_and_row_indices_lists<decode_block_size_t, true, level_t>(
             processed_count, s, nz_idx_buf, def, rep, t);
       } else if constexpr (has_nesting_t) {
-        next_valid_count = update_validity_and_row_indices_nested<true, decode_block_size_t, level_t>(
+        next_valid_count = update_validity_and_row_indices_nested<decode_block_size_t, level_t>(
           processed_count, s, nz_idx_buf, def, t);
       } else {
-        next_valid_count = update_validity_and_row_indices_flat<true, decode_block_size_t, level_t>(
+        int value_count;
+        cuda::std::tie(value_count, next_valid_count) = update_validity_and_row_indices_flat<decode_block_size_t, level_t>(
           processed_count, s, nz_idx_buf, def, t);
       }
     }
@@ -1405,8 +1349,8 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
     // nz_idx.  decode_fixed_width_values would be the only work that happens.
     else {
       if constexpr (has_lists_t) {
-        next_valid_count =
-          update_validity_and_row_indices_lists<true, decode_block_size_t, false, level_t>(
+        cuda::std::tie(max_depth_value_count, next_valid_count) =
+          update_validity_and_row_indices_lists<decode_block_size_t, false, level_t>(
             processed_count, s, nz_idx_buf, nullptr, rep, t);
       } else {
         // direct copy: no nulls, no lists, no need to update validity or row indices
@@ -1422,6 +1366,12 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size_t, 8)
     valid_count = next_valid_count;
   }
   pp->num_valids_processed = valid_count;
+  if constexpr (has_lists_t) {
+    pp->num_values_processed = s->nesting_info[s->col.max_nesting_depth - 1].value_count;
+    pp->max_depth_valid_map_offset = s->nesting_info[s->col.max_nesting_depth - 1].valid_map_offset;
+  } else {
+    pp->num_values_processed = s->input_row_count;
+  }
 
   if (t == 0 and s->error != 0) { set_error(s->error, error_code); }
 }
@@ -1581,57 +1531,57 @@ void decode_validity_and_row_indices(cudf::detail::hostdevice_span<PageInfo> pag
   dim3 dim_block(128, 1);
   dim3 dim_grid(pages.size(), 1);  // 1 threadblock per page
 
-  if (level_type_size == 1) {
-    if (has_lists) {
+    if (level_type_size == 1) {
+      if (has_lists) {
       decode_validity_and_row_indices<uint8_t, 128, false, true>
-        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
-                                                       chunks,
-                                                       min_row,
-                                                       num_rows,
-                                                       page_mask,
-                                                       error_code);
-    } else if (has_nesting) {
+          <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                        chunks,
+                                                        min_row,
+                                                        num_rows,
+                                                        page_mask,
+                                                        error_code);
+      } else if (has_nesting) {
       decode_validity_and_row_indices<uint8_t, 128, true, false>
-        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
-                                                       chunks,
-                                                       min_row,
-                                                       num_rows,
-                                                       page_mask,
-                                                       error_code);
-    } else {
+          <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                        chunks,
+                                                        min_row,
+                                                        num_rows,
+                                                        page_mask,
+                                                        error_code);
+      } else {
       decode_validity_and_row_indices<uint8_t, 128, false, false>
-        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
-                                                       chunks,
-                                                       min_row,
-                                                       num_rows,
-                                                       page_mask,
-                                                       error_code);
-    }
-  } else {
-    if (has_lists) {
-      decode_validity_and_row_indices<uint16_t, 128, false, true>
-        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
-                                                       chunks,
-                                                       min_row,
-                                                       num_rows,
-                                                       page_mask,
-                                                       error_code);
-    } else if (has_nesting) {
-      decode_validity_and_row_indices<uint16_t, 128, true, false>
-        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
-                                                       chunks,
-                                                       min_row,
-                                                       num_rows,
-                                                       page_mask,
-                                                       error_code);
+          <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                        chunks,
+                                                        min_row,
+                                                        num_rows,
+                                                        page_mask,
+                                                        error_code);
+      }
     } else {
+      if (has_lists) {
+      decode_validity_and_row_indices<uint16_t, 128, false, true>
+          <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                        chunks,
+                                                        min_row,
+                                                        num_rows,
+                                                        page_mask,
+                                                        error_code);
+      } else if (has_nesting) {
+      decode_validity_and_row_indices<uint16_t, 128, true, false>
+          <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                        chunks,
+                                                        min_row,
+                                                        num_rows,
+                                                        page_mask,
+                                                        error_code);
+      } else {
       decode_validity_and_row_indices<uint16_t, 128, false, false>
-        <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
-                                                       chunks,
-                                                       min_row,
-                                                       num_rows,
-                                                       page_mask,
-                                                       error_code);
+          <<<dim_grid, dim_block, 0, stream.value()>>>(pages.device_ptr(),
+                                                        chunks,
+                                                        min_row,
+                                                        num_rows,
+                                                        page_mask,
+                                                        error_code);
     }
   }
 }
