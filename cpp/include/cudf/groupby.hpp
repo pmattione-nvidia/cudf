@@ -193,6 +193,11 @@ class groupby {
    * output key columns with nulls where rolled keys are inactive, appends an INT64 `group_id`
    * bitmask column, and runs the same finalize path as hash `aggregate`.
    *
+   * @param rolled_up_key_column_indices Zero-based indices of key columns that participate in the
+   * rollup hierarchy; must be unique. Key columns not listed appear in every grouping set.
+   * @param requests The set of columns to aggregate and the aggregations to perform
+   * @param stream CUDA stream used for device memory operations and kernel launches.
+   * @param mr Device memory resource used to allocate the returned table and columns' device memory
    * @return Key columns, then `group_id` (INT64), then one `aggregation_result` per
    * request.
    */
