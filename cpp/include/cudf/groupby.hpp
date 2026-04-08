@@ -177,6 +177,31 @@ class groupby {
     host_span<aggregation_request const> requests,
     rmm::cuda_stream_view stream      = cudf::get_default_stream(),
     rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+  /**
+   * @brief Performs hash ROLLUP aggregations (hierarchical grouping sets).
+   *
+   * `rolled_up_key_column_indices` lists zero-based key column positions that participate in the
+   * rollup hierarchy; indices must be unique. Columns not listed behave as ordinary GROUP BY keys
+   * present in every grouping set. Request value columns must have `keys.num_rows()` rows, as with
+   * `aggregate`.
+   *
+   * Implementation (hash path only; `_keys_are_sorted` must be `sorted::NO`): validates indices and
+   * requests, then dispatches to `cudf::groupby::detail::hash::rollup`. That path expands each input
+   * row into one virtual row per grouping level, probes a device hash set of virtual indices keyed
+   * by active keys and level, aggregates into a sparse then dense result table, materializes output
+   * key columns with nulls where rolled keys are inactive, appends an INT64 `group_id` bitmask column,
+   * and runs the same finalize path as hash `aggregate`.
+   *
+   * @return Key columns, then `group_id` (INT64), then one `aggregation_result` per
+   * request.
+   */
+  std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
+    std::vector<size_type> const& rolled_up_key_column_indices,
+    host_span<aggregation_request const> requests,
+    rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+    rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
   /**
    * @brief Performs grouped scans on the specified values.
    *

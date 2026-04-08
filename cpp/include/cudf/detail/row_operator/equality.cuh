@@ -89,6 +89,236 @@ struct nan_equal_physical_equality_comparator {
 };
 
 /**
+ * @brief Performs an equality comparison between two elements in dictionary columns
+ */
+template <typename PhysicalEqualityComparator>
+class dictionary_column_element_comparator {
+ public:
+  __device__ dictionary_column_element_comparator(column_device_view lhs,
+                                                  column_device_view rhs,
+                                                  PhysicalEqualityComparator comparator = {}) noexcept
+    : lhs{lhs}, rhs{rhs}, comparator{comparator}
+  {
+  }
+
+  template <typename KeyType>
+  __device__ bool operator()(size_type lhs_element_index,
+                             size_type rhs_element_index) const noexcept
+    requires(cudf::is_equality_comparable<KeyType, KeyType>())
+  {
+    auto const lidx = lhs.element<cudf::dictionary32>(lhs_element_index).value();
+    auto const ridx = rhs.element<cudf::dictionary32>(rhs_element_index).value();
+    auto const lh_elem =
+      lhs.child(cudf::dictionary_column_view::keys_column_index).element<KeyType>(lidx);
+    auto const rh_elem =
+      rhs.child(cudf::dictionary_column_view::keys_column_index).element<KeyType>(ridx);
+    return comparator(lh_elem, rh_elem);
+  }
+
+  template <typename KeyType, typename... Args>
+  __device__ bool operator()(Args...) const noexcept
+    requires(not cudf::is_equality_comparable<KeyType, KeyType>())
+  {
+    CUDF_UNREACHABLE("Key types are not comparable");
+  }
+
+ private:
+  column_device_view lhs;
+  column_device_view rhs;
+  PhysicalEqualityComparator comparator;
+};
+
+/**
+ * @brief Performs an equality comparison between two elements in two columns.
+ */
+template <bool has_nested_columns,
+          typename Nullate,
+          typename PhysicalEqualityComparator = nan_equal_physical_equality_comparator>
+class element_comparator {
+ public:
+  /**
+   * @brief Construct type-dispatched function object for comparing equality
+   * between two elements.
+   *
+   * @note `lhs` and `rhs` may be the same.
+   *
+   * @param check_nulls Indicates if either input column contains nulls.
+   * @param lhs The column containing the first element
+   * @param rhs The column containing the second element (may be the same as lhs)
+   * @param nulls_are_equal Indicates if two null elements are treated as equivalent
+   * @param comparator Physical element equality comparison functor.
+   */
+  __device__ element_comparator(Nullate check_nulls,
+                                column_device_view lhs,
+                                column_device_view rhs,
+                                null_equality nulls_are_equal         = null_equality::EQUAL,
+                                PhysicalEqualityComparator comparator = {}) noexcept
+    : lhs{lhs},
+      rhs{rhs},
+      check_nulls{check_nulls},
+      nulls_are_equal{nulls_are_equal},
+      comparator{comparator}
+  {
+  }
+
+  /**
+   * @brief Compares the specified elements for equality.
+   *
+   * @param lhs_element_index The index of the first element
+   * @param rhs_element_index The index of the second element
+   * @return True if lhs and rhs are equal or if both lhs and rhs are null and nulls are
+   * considered equal (`nulls_are_equal` == `null_equality::EQUAL`)
+   */
+  template <typename Element>
+  __device__ bool operator()(size_type const lhs_element_index,
+                             size_type const rhs_element_index) const noexcept
+    requires(cudf::is_equality_comparable<Element, Element>() and
+             not cudf::is_dictionary<Element>())
+  {
+    if (check_nulls) {
+      bool const lhs_is_null{lhs.is_null(lhs_element_index)};
+      bool const rhs_is_null{rhs.is_null(rhs_element_index)};
+      if (lhs_is_null and rhs_is_null) {
+        return nulls_are_equal == null_equality::EQUAL;
+      } else if (lhs_is_null != rhs_is_null) {
+        return false;
+      }
+    }
+
+    return comparator(lhs.element<Element>(lhs_element_index),
+                      rhs.element<Element>(rhs_element_index));
+  }
+
+  template <typename Element>
+#ifndef NDEBUG
+  __attribute__((noinline))
+#endif
+  __device__ bool
+  operator()(size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
+    requires(cudf::is_dictionary<Element>())
+  {
+    if (check_nulls) {
+      bool const lhs_is_null{lhs.is_null(lhs_element_index)};
+      bool const rhs_is_null{rhs.is_null(rhs_element_index)};
+      if (lhs_is_null and rhs_is_null) {
+        return nulls_are_equal == null_equality::EQUAL;
+      } else if (lhs_is_null != rhs_is_null) {
+        return false;
+      }
+    }
+
+    return cudf::type_dispatcher<dispatch_void_if_nested>(
+      lhs.child(cudf::dictionary_column_view::keys_column_index).type(),
+      dictionary_column_element_comparator<PhysicalEqualityComparator>{lhs, rhs, comparator},
+      lhs_element_index,
+      rhs_element_index);
+  }
+
+  template <typename Element, typename... Args>
+  __device__ bool operator()(Args...) const noexcept
+    requires(not cudf::is_equality_comparable<Element, Element>() and
+             (not has_nested_columns or not cudf::is_nested<Element>()))
+  {
+    CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");
+  }
+
+  template <typename Element>
+#ifndef NDEBUG
+  __attribute__((noinline))
+#endif
+  __device__ bool
+  operator()(size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
+    requires(has_nested_columns and cudf::is_nested<Element>())
+  {
+    column_device_view lcol = lhs.slice(lhs_element_index, 1);
+    column_device_view rcol = rhs.slice(rhs_element_index, 1);
+    while (lcol.type().id() == type_id::STRUCT || lcol.type().id() == type_id::LIST) {
+      if (check_nulls) {
+        auto lvalid = detail::make_validity_iterator<true>(lcol);
+        auto rvalid = detail::make_validity_iterator<true>(rcol);
+        if (nulls_are_equal == null_equality::UNEQUAL) {
+          if (thrust::any_of(
+                thrust::seq, lvalid, lvalid + lcol.size(), cuda::std::logical_not<bool>()) or
+                thrust::any_of(
+                  thrust::seq, rvalid, rvalid + rcol.size(), cuda::std::logical_not<bool>())) {
+            return false;
+          }
+        } else {
+          if (not thrust::equal(thrust::seq, lvalid, lvalid + lcol.size(), rvalid)) {
+            return false;
+          }
+        }
+      }
+      if (lcol.type().id() == type_id::STRUCT) {
+        if (lcol.num_child_columns() == 0) { return true; }
+        lcol = detail::structs_column_device_view(lcol).get_sliced_child(0);
+        rcol = detail::structs_column_device_view(rcol).get_sliced_child(0);
+      } else if (lcol.type().id() == type_id::LIST) {
+        auto l_list_col = detail::lists_column_device_view(lcol);
+        auto r_list_col = detail::lists_column_device_view(rcol);
+
+        auto lsizes = make_list_size_iterator(l_list_col);
+        auto rsizes = make_list_size_iterator(r_list_col);
+        if (not thrust::equal(thrust::seq, lsizes, lsizes + lcol.size(), rsizes)) {
+          return false;
+        }
+
+        lcol = l_list_col.get_sliced_child();
+        rcol = r_list_col.get_sliced_child();
+        if (lcol.size() != rcol.size()) { return false; }
+      }
+    }
+
+    auto comp = column_comparator{
+      element_comparator<has_nested_columns, Nullate, PhysicalEqualityComparator>{
+        check_nulls, lcol, rcol, nulls_are_equal, comparator},
+      lcol.size()};
+    return type_dispatcher<dispatch_void_if_nested>(lcol.type(), comp);
+  }
+
+ private:
+  /**
+   * @brief Serially compare two columns for equality.
+   *
+   * When we want to get the equivalence of two columns by serially comparing all elements in
+   * one column with the corresponding elements in the other column, this saves us from type
+   * dispatching for each individual element in the range
+   */
+  struct column_comparator {
+    element_comparator<has_nested_columns, Nullate, PhysicalEqualityComparator> const comp;
+    size_type const size;
+
+    /**
+     * @brief Serially compare two columns for equality.
+     *
+     * @return True if ALL elements compare equal, false otherwise
+     */
+    template <typename Element>
+    __device__ bool operator()() const noexcept
+      requires(cudf::is_equality_comparable<Element, Element>())
+    {
+      return thrust::all_of(thrust::seq,
+                            cuda::counting_iterator<cudf::size_type>{0},
+                            cuda::counting_iterator<cudf::size_type>{0} + size,
+                            [this](auto i) { return comp.template operator()<Element>(i, i); });
+    }
+
+    template <typename Element, typename... Args>
+    __device__ bool operator()(Args...) const noexcept
+      requires(not cudf::is_equality_comparable<Element, Element>())
+    {
+      CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");
+    }
+  };
+
+  column_device_view const lhs;
+  column_device_view const rhs;
+  Nullate const check_nulls;
+  null_equality const nulls_are_equal;
+  PhysicalEqualityComparator const comparator;
+};
+
+/**
  * @brief Computes the equality comparison between 2 rows.
  *
  * Equality is determined by comparing rows element by element. The first mismatching element
@@ -131,7 +361,8 @@ class device_row_comparator {
     auto equal_elements = [lhs_index, rhs_index, this](column_device_view l, column_device_view r) {
       return cudf::type_dispatcher(
         l.type(),
-        element_comparator{check_nulls, l, r, nulls_are_equal, comparator},
+        element_comparator<has_nested_columns, Nullate, PhysicalEqualityComparator>{
+          check_nulls, l, r, nulls_are_equal, comparator},
         lhs_index,
         rhs_index);
     };
@@ -162,230 +393,6 @@ class device_row_comparator {
       comparator{comparator}
   {
   }
-
-  /**
-   * @brief Performs an equality comparison between two elements in dictionary columns
-   */
-  class dictionary_comparator {
-   public:
-    __device__ dictionary_comparator(column_device_view lhs,
-                                     column_device_view rhs,
-                                     PhysicalEqualityComparator comparator = {}) noexcept
-      : lhs{lhs}, rhs{rhs}, comparator{comparator}
-    {
-    }
-
-    template <typename KeyType>
-    __device__ bool operator()(size_type lhs_element_index,
-                               size_type rhs_element_index) const noexcept
-      requires(cudf::is_equality_comparable<KeyType, KeyType>())
-    {
-      auto const lidx = lhs.element<cudf::dictionary32>(lhs_element_index).value();
-      auto const ridx = rhs.element<cudf::dictionary32>(rhs_element_index).value();
-      auto const lh_elem =
-        lhs.child(cudf::dictionary_column_view::keys_column_index).element<KeyType>(lidx);
-      auto const rh_elem =
-        rhs.child(cudf::dictionary_column_view::keys_column_index).element<KeyType>(ridx);
-      return comparator(lh_elem, rh_elem);
-    }
-
-    template <typename KeyType, typename... Args>
-    __device__ bool operator()(Args...) const noexcept
-      requires(not cudf::is_equality_comparable<KeyType, KeyType>())
-    {
-      CUDF_UNREACHABLE("Key types are not comparable");
-    }
-
-   private:
-    column_device_view lhs;
-    column_device_view rhs;
-    PhysicalEqualityComparator comparator;
-  };
-
-  /**
-   * @brief Performs an equality comparison between two elements in two columns.
-   */
-  class element_comparator {
-   public:
-    /**
-     * @brief Construct type-dispatched function object for comparing equality
-     * between two elements.
-     *
-     * @note `lhs` and `rhs` may be the same.
-     *
-     * @param check_nulls Indicates if either input column contains nulls.
-     * @param lhs The column containing the first element
-     * @param rhs The column containing the second element (may be the same as lhs)
-     * @param nulls_are_equal Indicates if two null elements are treated as equivalent
-     * @param comparator Physical element equality comparison functor.
-     */
-    __device__ element_comparator(Nullate check_nulls,
-                                  column_device_view lhs,
-                                  column_device_view rhs,
-                                  null_equality nulls_are_equal         = null_equality::EQUAL,
-                                  PhysicalEqualityComparator comparator = {}) noexcept
-      : lhs{lhs},
-        rhs{rhs},
-        check_nulls{check_nulls},
-        nulls_are_equal{nulls_are_equal},
-        comparator{comparator}
-    {
-    }
-
-    /**
-     * @brief Compares the specified elements for equality.
-     *
-     * @param lhs_element_index The index of the first element
-     * @param rhs_element_index The index of the second element
-     * @return True if lhs and rhs are equal or if both lhs and rhs are null and nulls are
-     * considered equal (`nulls_are_equal` == `null_equality::EQUAL`)
-     */
-    template <typename Element>
-    __device__ bool operator()(size_type const lhs_element_index,
-                               size_type const rhs_element_index) const noexcept
-      requires(cudf::is_equality_comparable<Element, Element>() and
-               not cudf::is_dictionary<Element>())
-    {
-      if (check_nulls) {
-        bool const lhs_is_null{lhs.is_null(lhs_element_index)};
-        bool const rhs_is_null{rhs.is_null(rhs_element_index)};
-        if (lhs_is_null and rhs_is_null) {
-          return nulls_are_equal == null_equality::EQUAL;
-        } else if (lhs_is_null != rhs_is_null) {
-          return false;
-        }
-      }
-
-      return comparator(lhs.element<Element>(lhs_element_index),
-                        rhs.element<Element>(rhs_element_index));
-    }
-
-    template <typename Element>
-#ifndef NDEBUG
-    __attribute__((noinline))
-#endif
-    __device__ bool
-    operator()(size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
-      requires(cudf::is_dictionary<Element>())
-    {
-      if (check_nulls) {
-        bool const lhs_is_null{lhs.is_null(lhs_element_index)};
-        bool const rhs_is_null{rhs.is_null(rhs_element_index)};
-        if (lhs_is_null and rhs_is_null) {
-          return nulls_are_equal == null_equality::EQUAL;
-        } else if (lhs_is_null != rhs_is_null) {
-          return false;
-        }
-      }
-
-      return cudf::type_dispatcher<dispatch_void_if_nested>(
-        lhs.child(cudf::dictionary_column_view::keys_column_index).type(),
-        dictionary_comparator{lhs, rhs, comparator},
-        lhs_element_index,
-        rhs_element_index);
-    }
-
-    template <typename Element, typename... Args>
-    __device__ bool operator()(Args...) const noexcept
-      requires(not cudf::is_equality_comparable<Element, Element>() and
-               (not has_nested_columns or not cudf::is_nested<Element>()))
-    {
-      CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");
-    }
-
-    template <typename Element>
-#ifndef NDEBUG
-    __attribute__((noinline))
-#endif
-    __device__ bool
-    operator()(size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
-      requires(has_nested_columns and cudf::is_nested<Element>())
-    {
-      column_device_view lcol = lhs.slice(lhs_element_index, 1);
-      column_device_view rcol = rhs.slice(rhs_element_index, 1);
-      while (lcol.type().id() == type_id::STRUCT || lcol.type().id() == type_id::LIST) {
-        if (check_nulls) {
-          auto lvalid = detail::make_validity_iterator<true>(lcol);
-          auto rvalid = detail::make_validity_iterator<true>(rcol);
-          if (nulls_are_equal == null_equality::UNEQUAL) {
-            if (thrust::any_of(
-                  thrust::seq, lvalid, lvalid + lcol.size(), cuda::std::logical_not<bool>()) or
-                thrust::any_of(
-                  thrust::seq, rvalid, rvalid + rcol.size(), cuda::std::logical_not<bool>())) {
-              return false;
-            }
-          } else {
-            if (not thrust::equal(thrust::seq, lvalid, lvalid + lcol.size(), rvalid)) {
-              return false;
-            }
-          }
-        }
-        if (lcol.type().id() == type_id::STRUCT) {
-          if (lcol.num_child_columns() == 0) { return true; }
-          lcol = detail::structs_column_device_view(lcol).get_sliced_child(0);
-          rcol = detail::structs_column_device_view(rcol).get_sliced_child(0);
-        } else if (lcol.type().id() == type_id::LIST) {
-          auto l_list_col = detail::lists_column_device_view(lcol);
-          auto r_list_col = detail::lists_column_device_view(rcol);
-
-          auto lsizes = make_list_size_iterator(l_list_col);
-          auto rsizes = make_list_size_iterator(r_list_col);
-          if (not thrust::equal(thrust::seq, lsizes, lsizes + lcol.size(), rsizes)) {
-            return false;
-          }
-
-          lcol = l_list_col.get_sliced_child();
-          rcol = r_list_col.get_sliced_child();
-          if (lcol.size() != rcol.size()) { return false; }
-        }
-      }
-
-      auto comp = column_comparator{
-        element_comparator{check_nulls, lcol, rcol, nulls_are_equal, comparator}, lcol.size()};
-      return type_dispatcher<dispatch_void_if_nested>(lcol.type(), comp);
-    }
-
-   private:
-    /**
-     * @brief Serially compare two columns for equality.
-     *
-     * When we want to get the equivalence of two columns by serially comparing all elements in
-     * one column with the corresponding elements in the other column, this saves us from type
-     * dispatching for each individual element in the range
-     */
-    struct column_comparator {
-      element_comparator const comp;
-      size_type const size;
-
-      /**
-       * @brief Serially compare two columns for equality.
-       *
-       * @return True if ALL elements compare equal, false otherwise
-       */
-      template <typename Element>
-      __device__ bool operator()() const noexcept
-        requires(cudf::is_equality_comparable<Element, Element>())
-      {
-        return thrust::all_of(thrust::seq,
-                              cuda::counting_iterator<cudf::size_type>{0},
-                              cuda::counting_iterator<cudf::size_type>{0} + size,
-                              [this](auto i) { return comp.template operator()<Element>(i, i); });
-      }
-
-      template <typename Element, typename... Args>
-      __device__ bool operator()(Args...) const noexcept
-        requires(not cudf::is_equality_comparable<Element, Element>())
-      {
-        CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");
-      }
-    };
-
-    column_device_view const lhs;
-    column_device_view const rhs;
-    Nullate const check_nulls;
-    null_equality const nulls_are_equal;
-    PhysicalEqualityComparator const comparator;
-  };
 
   table_device_view const lhs;
   table_device_view const rhs;

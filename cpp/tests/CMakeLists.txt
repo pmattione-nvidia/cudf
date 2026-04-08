@@ -159,6 +159,7 @@ ConfigureTest(
   groupby/tdigest_tests.cpp
   groupby/topk_tests.cpp
   groupby/var_tests.cpp
+  groupby/rollup_tests.cpp
   GPUS 1
   PERCENT 100
 )

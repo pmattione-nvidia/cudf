@@ -32,6 +32,7 @@
 #include <cuda/iterator>
 
 #include <memory>
+#include <unordered_set>
 #include <utility>
 
 namespace cudf {
@@ -234,6 +235,44 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> groupby::aggr
   if (_keys.num_rows() == 0) { return {empty_like(_keys), empty_results(requests, stream, mr)}; }
 
   return dispatch_aggregation(requests, stream, mr);
+}
+
+// ROLLUP: public entry validates rolled key indices and request shapes, rejects the sorted-keys
+// path, then delegates to detail::hash::rollup (virtual-row hash set + dense aggregates).
+std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> groupby::rollup(
+  std::vector<size_type> const& rolled_up_key_column_indices,
+  host_span<aggregation_request const> requests,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  for (auto const idx : rolled_up_key_column_indices) {
+    CUDF_EXPECTS(idx >= 0 && idx < _keys.num_columns(), "rollup key column index out of range");
+  }
+  std::unordered_set<size_type> const unique_rolled(rolled_up_key_column_indices.begin(),
+                                                      rolled_up_key_column_indices.end());
+  CUDF_EXPECTS(unique_rolled.size() == rolled_up_key_column_indices.size(),
+               "rollup rolled key column indices must be unique");
+
+  CUDF_EXPECTS(
+    std::all_of(requests.begin(),
+                requests.end(),
+                [this](auto const& request) { return request.values.size() == _keys.num_rows(); }),
+    "Size mismatch between request values and groupby keys.");
+
+  verify_valid_requests(requests);
+
+  CUDF_EXPECTS(_keys_are_sorted == sorted::NO,
+               "groupby ROLLUP sorted-keys path is not implemented");
+
+  return detail::hash::rollup(
+    _keys,
+    requests,
+    cudf::host_span<size_type const>{rolled_up_key_column_indices.data(),
+                                     rolled_up_key_column_indices.size()},
+    _include_null_keys,
+    stream,
+    mr);
 }
 
 // Compute scan requests

@@ -34,5 +34,16 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> groupby(
   null_policy include_null_keys,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
+
+// Hash-based ROLLUP (grouping sets); keys must not use the sorted groupby path.
+// Argument order matches `groupby` with rolled key indices inserted after `requests`.
+std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
+  table_view const& keys,
+  host_span<aggregation_request const> requests,
+  host_span<size_type const> rolled_up_key_column_indices,
+  null_policy include_null_keys,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
 }  // namespace groupby::detail::hash
 }  // namespace cudf

@@ -97,6 +97,94 @@ class element_hasher {
 };
 
 /**
+ * @brief `type_dispatcher` functor that hashes one cell of a column (plain, dictionary, or nested).
+ *
+ * Used by `device_row_hasher` and by callers that must match row hashing without building a
+ * `table_device_view` for a single column on device.
+ *
+ * @tparam hash_function Hash functor to use for hashing elements.
+ * @tparam Nullate A cudf::nullate type describing whether to check for nulls.
+ */
+template <template <typename> class hash_function, typename Nullate>
+class element_hasher_adapter {
+ public:
+  using result_type = cuda::std::invoke_result_t<hash_function<int32_t>, int32_t>;
+
+ private:
+  static constexpr result_type NULL_HASH     = cuda::std::numeric_limits<result_type>::max();
+  static constexpr result_type NON_NULL_HASH = 0;
+
+ public:
+  __device__ element_hasher_adapter(Nullate check_nulls, result_type seed) noexcept
+    : _element_hasher(check_nulls, seed), _check_nulls(check_nulls)
+  {
+  }
+
+  template <typename T>
+  __device__ result_type operator()(column_device_view const& col,
+                                    size_type row_index) const noexcept
+    requires(not cudf::is_nested<T>() and not cudf::is_dictionary<T>())
+  {
+    return _element_hasher.template operator()<T>(col, row_index);
+  }
+
+  template <typename T>
+  __device__ result_type operator()(column_device_view const& col,
+                                    size_type row_index) const noexcept
+    requires(cudf::is_dictionary<T>())
+  {
+    if (_check_nulls && col.is_null(row_index)) { return NULL_HASH; }
+
+    auto const keys = col.child(dictionary_column_view::keys_column_index);
+    return type_dispatcher<dispatch_storage_type>(
+      keys.type(),
+      _element_hasher,
+      keys,
+      static_cast<size_type>(col.element<dictionary32>(row_index)));
+  }
+
+  template <typename T>
+  __device__ result_type operator()(column_device_view const& col,
+                                    size_type row_index) const noexcept
+    requires(cudf::is_nested<T>())
+  {
+    auto hash                   = result_type{0};
+    column_device_view curr_col = col.slice(row_index, 1);
+    while (curr_col.type().id() == type_id::STRUCT || curr_col.type().id() == type_id::LIST) {
+      if (_check_nulls) {
+        auto validity_it = detail::make_validity_iterator<true>(curr_col);
+        hash             = detail::accumulate(
+          validity_it, validity_it + curr_col.size(), hash, [](auto hash, auto is_valid) {
+            return cudf::hashing::detail::hash_combine(hash,
+                                                       is_valid ? NON_NULL_HASH : NULL_HASH);
+          });
+      }
+      if (curr_col.type().id() == type_id::STRUCT) {
+        if (curr_col.num_child_columns() == 0) { return hash; }
+        curr_col = detail::structs_column_device_view(curr_col).get_sliced_child(0);
+      } else if (curr_col.type().id() == type_id::LIST) {
+        auto list_col   = detail::lists_column_device_view(curr_col);
+        auto list_sizes = make_list_size_iterator(list_col);
+        hash            = detail::accumulate(
+          list_sizes, list_sizes + list_col.size(), hash, [](auto hash, auto size) {
+            return cudf::hashing::detail::hash_combine(hash, hash_function<size_type>{}(size));
+          });
+        curr_col = list_col.get_sliced_child();
+      }
+    }
+    for (int i = 0; i < curr_col.size(); ++i) {
+      hash = cudf::hashing::detail::hash_combine(
+        hash,
+        type_dispatcher<dispatch_void_if_nested>(curr_col.type(), _element_hasher, curr_col, i));
+    }
+    return hash;
+  }
+
+  element_hasher<hash_function, Nullate> const _element_hasher;
+  Nullate const _check_nulls;
+};
+
+/**
  * @brief Computes the hash value of a row in the given table.
  *
  * @tparam hash_function Hash functor to use for hashing elements.
@@ -119,7 +207,10 @@ class device_row_hasher {
   {
     auto const hasher = [row_index, this](auto const& column) {
       return cudf::type_dispatcher<dispatch_storage_type>(
-        column.type(), element_hasher_adapter{_check_nulls, _seed}, column, row_index);
+        column.type(),
+        element_hasher_adapter<hash_function, Nullate>{_check_nulls, _seed},
+        column,
+        row_index);
     };
 
     auto const has_columns = _table.num_columns() > 0;
@@ -134,87 +225,6 @@ class device_row_hasher {
   }
 
  private:
-  /**
-   * @brief Computes the hash value of an element in the given column.
-   *
-   * When the column is non-nested, this is a simple wrapper around the element_hasher.
-   * When the column is nested, this uses the element_hasher to hash the shape and values of the
-   * column.
-   */
-  class element_hasher_adapter {
-    static constexpr result_type NULL_HASH     = cuda::std::numeric_limits<result_type>::max();
-    static constexpr result_type NON_NULL_HASH = 0;
-
-   public:
-    __device__ element_hasher_adapter(Nullate check_nulls, result_type seed) noexcept
-      : _element_hasher(check_nulls, seed), _check_nulls(check_nulls)
-    {
-    }
-
-    template <typename T>
-    __device__ result_type operator()(column_device_view const& col,
-                                      size_type row_index) const noexcept
-      requires(not cudf::is_nested<T>() and not cudf::is_dictionary<T>())
-    {
-      return _element_hasher.template operator()<T>(col, row_index);
-    }
-
-    template <typename T>
-    __device__ result_type operator()(column_device_view const& col,
-                                      size_type row_index) const noexcept
-      requires(cudf::is_dictionary<T>())
-    {
-      if (_check_nulls && col.is_null(row_index)) { return NULL_HASH; }
-
-      auto const keys = col.child(dictionary_column_view::keys_column_index);
-      return type_dispatcher<dispatch_storage_type>(
-        keys.type(),
-        _element_hasher,
-        keys,
-        static_cast<size_type>(col.element<dictionary32>(row_index)));
-    }
-
-    template <typename T>
-    __device__ result_type operator()(column_device_view const& col,
-                                      size_type row_index) const noexcept
-      requires(cudf::is_nested<T>())
-    {
-      auto hash                   = result_type{0};
-      column_device_view curr_col = col.slice(row_index, 1);
-      while (curr_col.type().id() == type_id::STRUCT || curr_col.type().id() == type_id::LIST) {
-        if (_check_nulls) {
-          auto validity_it = detail::make_validity_iterator<true>(curr_col);
-          hash             = detail::accumulate(
-            validity_it, validity_it + curr_col.size(), hash, [](auto hash, auto is_valid) {
-              return cudf::hashing::detail::hash_combine(hash,
-                                                         is_valid ? NON_NULL_HASH : NULL_HASH);
-            });
-        }
-        if (curr_col.type().id() == type_id::STRUCT) {
-          if (curr_col.num_child_columns() == 0) { return hash; }
-          curr_col = detail::structs_column_device_view(curr_col).get_sliced_child(0);
-        } else if (curr_col.type().id() == type_id::LIST) {
-          auto list_col   = detail::lists_column_device_view(curr_col);
-          auto list_sizes = make_list_size_iterator(list_col);
-          hash            = detail::accumulate(
-            list_sizes, list_sizes + list_col.size(), hash, [](auto hash, auto size) {
-              return cudf::hashing::detail::hash_combine(hash, hash_function<size_type>{}(size));
-            });
-          curr_col = list_col.get_sliced_child();
-        }
-      }
-      for (int i = 0; i < curr_col.size(); ++i) {
-        hash = cudf::hashing::detail::hash_combine(
-          hash,
-          type_dispatcher<dispatch_void_if_nested>(curr_col.type(), _element_hasher, curr_col, i));
-      }
-      return hash;
-    }
-
-    element_hasher<hash_function, Nullate> const _element_hasher;
-    Nullate const _check_nulls;
-  };
-
   CUDF_HOST_DEVICE device_row_hasher(Nullate check_nulls,
                                      table_device_view t,
                                      result_type seed = DEFAULT_HASH_SEED) noexcept
