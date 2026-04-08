@@ -94,9 +94,10 @@ struct nan_equal_physical_equality_comparator {
 template <typename PhysicalEqualityComparator>
 class dictionary_column_element_comparator {
  public:
-  __device__ dictionary_column_element_comparator(column_device_view lhs,
-                                                  column_device_view rhs,
-                                                  PhysicalEqualityComparator comparator = {}) noexcept
+  __device__ dictionary_column_element_comparator(
+    column_device_view lhs,
+    column_device_view rhs,
+    PhysicalEqualityComparator comparator = {}) noexcept
     : lhs{lhs}, rhs{rhs}, comparator{comparator}
   {
   }
@@ -239,8 +240,8 @@ class element_comparator {
         if (nulls_are_equal == null_equality::UNEQUAL) {
           if (thrust::any_of(
                 thrust::seq, lvalid, lvalid + lcol.size(), cuda::std::logical_not<bool>()) or
-                thrust::any_of(
-                  thrust::seq, rvalid, rvalid + rcol.size(), cuda::std::logical_not<bool>())) {
+              thrust::any_of(
+                thrust::seq, rvalid, rvalid + rcol.size(), cuda::std::logical_not<bool>())) {
             return false;
           }
         } else {
@@ -259,9 +260,7 @@ class element_comparator {
 
         auto lsizes = make_list_size_iterator(l_list_col);
         auto rsizes = make_list_size_iterator(r_list_col);
-        if (not thrust::equal(thrust::seq, lsizes, lsizes + lcol.size(), rsizes)) {
-          return false;
-        }
+        if (not thrust::equal(thrust::seq, lsizes, lsizes + lcol.size(), rsizes)) { return false; }
 
         lcol = l_list_col.get_sliced_child();
         rcol = r_list_col.get_sliced_child();
@@ -269,10 +268,10 @@ class element_comparator {
       }
     }
 
-    auto comp = column_comparator{
-      element_comparator<has_nested_columns, Nullate, PhysicalEqualityComparator>{
-        check_nulls, lcol, rcol, nulls_are_equal, comparator},
-      lcol.size()};
+    auto comp =
+      column_comparator{element_comparator<has_nested_columns, Nullate, PhysicalEqualityComparator>{
+                          check_nulls, lcol, rcol, nulls_are_equal, comparator},
+                        lcol.size()};
     return type_dispatcher<dispatch_void_if_nested>(lcol.type(), comp);
   }
 

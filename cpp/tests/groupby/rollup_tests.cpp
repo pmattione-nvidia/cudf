@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <cudf/groupby.hpp>
-
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
@@ -40,7 +38,8 @@ struct RollupTest : public cudf::test::BaseFixture {};
 
 namespace {
 
-[[nodiscard]] std::pair<std::unique_ptr<cudf::table>, std::vector<cudf::groupby::aggregation_result>>
+[[nodiscard]] std::pair<std::unique_ptr<cudf::table>,
+                        std::vector<cudf::groupby::aggregation_result>>
 run_rollup_sum(cudf::table_view const& keys,
                cudf::column_view const& values,
                std::vector<cudf::size_type> rolled_indices)
@@ -60,8 +59,8 @@ run_rollup_sum(cudf::table_view const& keys,
   cudf::table_view const& keys_and_group_id, cudf::column_view const& sum_col)
 {
   auto const nk = keys_and_group_id.num_columns() - 1;  // last column is INT64 group_id
-  CUDF_EXPECTS(
-    sum_col.size() == keys_and_group_id.num_rows(), "rollup test: sum column row count must match keys");
+  CUDF_EXPECTS(sum_col.size() == keys_and_group_id.num_rows(),
+               "rollup test: sum column row count must match keys");
 
   std::vector<cudf::column_view> sort_keys;
   sort_keys.reserve(static_cast<std::size_t>(nk + 2));
@@ -78,7 +77,7 @@ run_rollup_sum(cudf::table_view const& keys,
 
   auto gather_map = cudf::sorted_order(cudf::table_view(sort_keys), orders, null_orders);
   auto gathered_keys_group_id = cudf::gather(keys_and_group_id, *gather_map);
-  auto gathered_sum      = cudf::gather(cudf::table_view{{sum_col}}, *gather_map);
+  auto gathered_sum           = cudf::gather(cudf::table_view{{sum_col}}, *gather_map);
 
   std::vector<std::unique_ptr<cudf::column>> cols = gathered_keys_group_id->release();
   cols.push_back(std::move(gathered_sum->release().front()));
@@ -127,18 +126,18 @@ run_rollup_sum(cudf::table_view const& keys,
 
 template <typename SumT>
 [[nodiscard]] bool less_for_sorted_rollup_compare(std::tuple<int64_t,
-                                                                std::optional<int32_t>,
-                                                                std::optional<int32_t>,
-                                                                std::optional<int32_t>,
-                                                                std::optional<SumT>> const& a,
+                                                             std::optional<int32_t>,
+                                                             std::optional<int32_t>,
+                                                             std::optional<int32_t>,
+                                                             std::optional<SumT>> const& a,
                                                   std::tuple<int64_t,
                                                              std::optional<int32_t>,
                                                              std::optional<int32_t>,
                                                              std::optional<int32_t>,
                                                              std::optional<SumT>> const& b)
 {
-  // Order matches sort_rollup_output_for_compare: group_id, k0, k1, k2, sum — ascending, nulls after
-  // (non-null keys before null; libcudf null_order::AFTER).
+  // Order matches sort_rollup_output_for_compare: group_id, k0, k1, k2, sum — ascending, nulls
+  // after (non-null keys before null; libcudf null_order::AFTER).
   if (std::get<0>(a) != std::get<0>(b)) { return std::get<0>(a) < std::get<0>(b); }
   if (std::get<1>(a).has_value() != std::get<1>(b).has_value()) {
     return std::get<1>(a).has_value();
@@ -166,14 +165,9 @@ template <typename SumT>
 }
 
 template <typename SumT>
-[[nodiscard]] bool less_str2(std::tuple<int64_t,
-                                       std::optional<std::string>,
-                                       std::optional<std::string>,
-                                       SumT> const& a,
-                             std::tuple<int64_t,
-                                        std::optional<std::string>,
-                                        std::optional<std::string>,
-                                        SumT> const& b)
+[[nodiscard]] bool less_str2(
+  std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, SumT> const& a,
+  std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, SumT> const& b)
 {
   if (std::get<0>(a) != std::get<0>(b)) { return std::get<0>(a) < std::get<0>(b); }
   for (int c = 1; c <= 2; ++c) {
@@ -186,14 +180,9 @@ template <typename SumT>
 }
 
 template <typename SumT>
-[[nodiscard]] bool less_i64_2(std::tuple<int64_t,
-                                         std::optional<int64_t>,
-                                         std::optional<int64_t>,
-                                         SumT> const& a,
-                              std::tuple<int64_t,
-                                         std::optional<int64_t>,
-                                         std::optional<int64_t>,
-                                         SumT> const& b)
+[[nodiscard]] bool less_i64_2(
+  std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, SumT> const& a,
+  std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, SumT> const& b)
 {
   if (std::get<0>(a) != std::get<0>(b)) { return std::get<0>(a) < std::get<0>(b); }
   for (int c = 1; c <= 2; ++c) {
@@ -226,15 +215,16 @@ void assert_sorted_rollup_matches_expected(
 
   for (auto const& row : expected_rows) {
     e_group_id.push_back(std::get<0>(row));
-    auto push_opt = [&](std::optional<int32_t> const& o, std::vector<int32_t>& kv, std::vector<bool>& vv) {
-      if (o) {
-        kv.push_back(*o);
-        vv.push_back(true);
-      } else {
-        kv.push_back(0);
-        vv.push_back(false);
-      }
-    };
+    auto push_opt =
+      [&](std::optional<int32_t> const& o, std::vector<int32_t>& kv, std::vector<bool>& vv) {
+        if (o) {
+          kv.push_back(*o);
+          vv.push_back(true);
+        } else {
+          kv.push_back(0);
+          vv.push_back(false);
+        }
+      };
     if (num_key_cols >= 1) { push_opt(std::get<1>(row), ek0, vk0); }
     if (num_key_cols >= 2) { push_opt(std::get<2>(row), ek1, vk1); }
     if (num_key_cols >= 3) { push_opt(std::get<3>(row), ek2, vk2); }
@@ -264,14 +254,21 @@ void assert_sorted_rollup_matches_expected(
 
   CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(num_key_cols), w_group_id);
   CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(num_key_cols + 1), wsum);
-  if (num_key_cols >= 1) { CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(0), make_k(ek0, vk0)); }
-  if (num_key_cols >= 2) { CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(1), make_k(ek1, vk1)); }
-  if (num_key_cols >= 3) { CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(2), make_k(ek2, vk2)); }
+  if (num_key_cols >= 1) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(0), make_k(ek0, vk0));
+  }
+  if (num_key_cols >= 2) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(1), make_k(ek1, vk1));
+  }
+  if (num_key_cols >= 3) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sorted_gpu->get_column(2), make_k(ek2, vk2));
+  }
 }
 
 void assert_sorted_rollup_string2_matches(
   std::unique_ptr<cudf::table> const& sorted_gpu,
-  std::vector<std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, sum_type>> const&
+  std::vector<
+    std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, sum_type>> const&
     expected_rows)
 {
   ASSERT_EQ(sorted_gpu->num_columns(), 4);
@@ -313,7 +310,8 @@ void assert_sorted_rollup_string2_matches(
 
 void assert_sorted_rollup_i64_2_matches(
   std::unique_ptr<cudf::table> const& sorted_gpu,
-  std::vector<std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, sum_i64_val>> const&
+  std::vector<
+    std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, sum_i64_val>> const&
     expected_rows)
 {
   ASSERT_EQ(sorted_gpu->num_columns(), 4);
@@ -324,15 +322,16 @@ void assert_sorted_rollup_i64_2_matches(
   std::vector<sum_i64_val> esum;
   for (auto const& row : expected_rows) {
     e_group_id.push_back(std::get<0>(row));
-    auto push_opt = [&](std::optional<int64_t> const& o, std::vector<int64_t>& kv, std::vector<bool>& vv) {
-      if (o) {
-        kv.push_back(*o);
-        vv.push_back(true);
-      } else {
-        kv.push_back(0);
-        vv.push_back(false);
-      }
-    };
+    auto push_opt =
+      [&](std::optional<int64_t> const& o, std::vector<int64_t>& kv, std::vector<bool>& vv) {
+        if (o) {
+          kv.push_back(*o);
+          vv.push_back(true);
+        } else {
+          kv.push_back(0);
+          vv.push_back(false);
+        }
+      };
     push_opt(std::get<1>(row), k0, vk0);
     push_opt(std::get<2>(row), k1, vk1);
     esum.push_back(std::get<3>(row));
@@ -376,13 +375,15 @@ void run_reference_rollup_int_keys(std::vector<int32_t> const& k0,
   auto const num_keys = static_cast<int>(rolled_indices.size());
   CUDF_EXPECTS(num_keys >= 1 && num_keys <= 3, "ref: 1..3 rolled key columns");
 
-  auto const ranks     = rollup_rolled_ranks(static_cast<cudf::size_type>(num_keys), rolled_indices);
+  auto const ranks = rollup_rolled_ranks(static_cast<cudf::size_type>(num_keys), rolled_indices);
   auto const num_rolled = static_cast<cudf::size_type>(rolled_indices.size());
   auto const nlev       = num_rolled + 1;
 
-  using AccKey = std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>>;
+  using AccKey =
+    std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>>;
   // Mirrors rollup_aggregate_insert_find_kernel: every (row, level) inserts into the set; SUM skips
-  // null measures (element_aggregator) so the sparse slot stays invalid until a valid value arrives.
+  // null measures (element_aggregator) so the sparse slot stays invalid until a valid value
+  // arrives.
   std::map<AccKey, std::optional<SumT>> acc;
 
   auto proj = [&](int c, cudf::size_type row, cudf::size_type level) -> std::optional<int32_t> {
@@ -424,31 +425,27 @@ void run_reference_rollup_int_keys(std::vector<int32_t> const& k0,
   out_sorted.clear();
   out_sorted.reserve(acc.size());
   for (auto const& [k, s] : acc) {
-    out_sorted.emplace_back(std::get<0>(k),
-                            std::get<1>(k),
-                            std::get<2>(k),
-                            std::get<3>(k),
-                            s);
+    out_sorted.emplace_back(std::get<0>(k), std::get<1>(k), std::get<2>(k), std::get<3>(k), s);
   }
   std::sort(out_sorted.begin(), out_sorted.end(), less_for_sorted_rollup_compare<SumT>);
 }
 
-void run_reference_rollup_string2(std::vector<std::string> const& k0,
-                                  std::vector<bool> const& m0,
-                                  std::vector<std::string> const& k1,
-                                  std::vector<bool> const& m1,
-                                  std::vector<sum_type> const& vals,
-                                  std::vector<bool> const& mv,
-                                  std::vector<std::tuple<int64_t,
-                                                         std::optional<std::string>,
-                                                         std::optional<std::string>,
-                                                         sum_type>>& out_sorted)
+void run_reference_rollup_string2(
+  std::vector<std::string> const& k0,
+  std::vector<bool> const& m0,
+  std::vector<std::string> const& k1,
+  std::vector<bool> const& m1,
+  std::vector<sum_type> const& vals,
+  std::vector<bool> const& mv,
+  std::vector<
+    std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, sum_type>>&
+    out_sorted)
 {
-  auto const n = static_cast<cudf::size_type>(vals.size());
-  auto const ranks = rollup_rolled_ranks(2, {0, 1});
+  auto const n          = static_cast<cudf::size_type>(vals.size());
+  auto const ranks      = rollup_rolled_ranks(2, {0, 1});
   auto const num_rolled = cudf::size_type{2};
   auto const nlev       = num_rolled + 1;
-  using AccKey          = std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>>;
+  using AccKey = std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>>;
   std::map<AccKey, sum_type> acc;
 
   for (cudf::size_type r = 0; r < n; ++r) {
@@ -473,19 +470,18 @@ void run_reference_rollup_string2(std::vector<std::string> const& k0,
   std::sort(out_sorted.begin(), out_sorted.end(), less_str2<sum_type>);
 }
 
-void run_reference_rollup_i64_2(std::vector<int64_t> const& k0,
-                                std::vector<bool> const& m0,
-                                std::vector<int64_t> const& k1,
-                                std::vector<bool> const& m1,
-                                std::vector<int64_t> const& vals,
-                                std::vector<bool> const& mv,
-                                std::vector<std::tuple<int64_t,
-                                                       std::optional<int64_t>,
-                                                       std::optional<int64_t>,
-                                                       sum_i64_val>>& out_sorted)
+void run_reference_rollup_i64_2(
+  std::vector<int64_t> const& k0,
+  std::vector<bool> const& m0,
+  std::vector<int64_t> const& k1,
+  std::vector<bool> const& m1,
+  std::vector<int64_t> const& vals,
+  std::vector<bool> const& mv,
+  std::vector<std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, sum_i64_val>>&
+    out_sorted)
 {
-  auto const n = static_cast<cudf::size_type>(vals.size());
-  auto const ranks = rollup_rolled_ranks(2, {0, 1});
+  auto const n          = static_cast<cudf::size_type>(vals.size());
+  auto const ranks      = rollup_rolled_ranks(2, {0, 1});
   auto const num_rolled = cudf::size_type{2};
   auto const nlev       = num_rolled + 1;
   using AccKey          = std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>>;
@@ -523,8 +519,8 @@ TEST_F(RollupTest, OneIntKeySumSingleInputRow)
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, v, {0});
   ASSERT_EQ(1, agg_out.size());
   ASSERT_EQ(1, agg_out.front().results.size());
-  auto const sorted =
-    sort_rollup_output_for_compare(out_keys_group_id->view(), agg_out.front().results.front()->view());
+  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
 
   cudf::test::fixed_width_column_wrapper<int32_t> expect_k({7, 0}, {1, 0});
   cudf::test::fixed_width_column_wrapper<int64_t> expect_group_id{0, 1};
@@ -542,8 +538,8 @@ TEST_F(RollupTest, OneIntKeySumTwoDistinctKeys)
   cudf::test::fixed_width_column_wrapper<int32_t> v{10, 20};
   cudf::table_view const keys{{k}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, v, {0});
-  auto const sorted =
-    sort_rollup_output_for_compare(out_keys_group_id->view(), agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
 
   cudf::test::fixed_width_column_wrapper<int32_t> expect_k({1, 2, 0}, {1, 1, 0});
   cudf::test::fixed_width_column_wrapper<int64_t> expect_group_id{0, 0, 1};
@@ -561,8 +557,8 @@ TEST_F(RollupTest, OneIntKeySumDuplicateKeyAggregatesWithinFinestLevel)
   cudf::test::fixed_width_column_wrapper<int32_t> v{10, 20};
   cudf::table_view const keys{{k}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, v, {0});
-  auto const sorted =
-    sort_rollup_output_for_compare(out_keys_group_id->view(), agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
 
   cudf::test::fixed_width_column_wrapper<int32_t> expect_k({1, 0}, {1, 0});
   cudf::test::fixed_width_column_wrapper<int64_t> expect_group_id{0, 1};
@@ -581,8 +577,8 @@ TEST_F(RollupTest, TwoIntKeysSumRollupBoth)
   cudf::test::fixed_width_column_wrapper<int32_t> v{100, 200};
   cudf::table_view const keys{{k0, k1}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, v, {0, 1});
-  auto const sorted =
-    sort_rollup_output_for_compare(out_keys_group_id->view(), agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
 
   cudf::test::fixed_width_column_wrapper<int32_t> expect_k0({1, 1, 1, 0}, {1, 1, 1, 0});
   cudf::test::fixed_width_column_wrapper<int32_t> expect_k1({10, 20, 0, 0}, {1, 1, 0, 0});
@@ -602,8 +598,8 @@ TEST_F(RollupTest, EmptyRolledListOrdinaryGroupByWithGroupingId)
   cudf::test::fixed_width_column_wrapper<int32_t> v{10, 20, 30};
   cudf::table_view const keys{{k}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, v, {});
-  auto const sorted =
-    sort_rollup_output_for_compare(out_keys_group_id->view(), agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
 
   cudf::test::fixed_width_column_wrapper<int32_t> expect_k{1, 2};
   cudf::test::fixed_width_column_wrapper<int64_t> expect_group_id{0, 0};
@@ -633,18 +629,16 @@ TEST_F(RollupTest, SingleRolledKeyProducesGrandTotalRowAndGroupIdMultiset)
   cudf::table_view const group_id_sort_table{group_id_col_views};
   auto const group_id_sort_map =
     cudf::sorted_order(group_id_sort_table, {cudf::order::ASCENDING}, {cudf::null_order::AFTER});
-  auto const sorted_group_id_tbl =
-    cudf::gather(group_id_sort_table, *group_id_sort_map);
+  auto const sorted_group_id_tbl = cudf::gather(group_id_sort_table, *group_id_sort_map);
   cudf::test::fixed_width_column_wrapper<int64_t> expect_group_id_multiset{0, 0, 1};
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(sorted_group_id_tbl->view().column(0), expect_group_id_multiset);
 
-  auto const sum_view = agg_out.front().results.front()->view();
-  auto const sum_total =
-    cudf::reduce(sum_view,
-                 *cudf::make_sum_aggregation<cudf::reduce_aggregation>(),
-                 cudf::data_type{cudf::type_id::INT64},
-                 cudf::test::get_default_stream());
-  auto const* ns = dynamic_cast<cudf::numeric_scalar<int64_t> const*>(sum_total.get());
+  auto const sum_view  = agg_out.front().results.front()->view();
+  auto const sum_total = cudf::reduce(sum_view,
+                                      *cudf::make_sum_aggregation<cudf::reduce_aggregation>(),
+                                      cudf::data_type{cudf::type_id::INT64},
+                                      cudf::test::get_default_stream());
+  auto const* ns       = dynamic_cast<cudf::numeric_scalar<int64_t> const*>(sum_total.get());
   ASSERT_NE(nullptr, ns);
   EXPECT_EQ(60, ns->value());
 }
@@ -659,32 +653,27 @@ TEST_F(RollupTest, FusedKernelStyle_RepeatSeqTwoIntKeysSum5000Rows)
   std::vector<sum_type> vals(static_cast<std::size_t>(n));
   std::vector<bool> const all_true(static_cast<std::size_t>(n), true);
   for (int i = 0; i < n; ++i) {
-    k0[static_cast<std::size_t>(i)] = 1 + (i % 10);
-    k1[static_cast<std::size_t>(i)] = 1 + (i % 20);
+    k0[static_cast<std::size_t>(i)]   = 1 + (i % 10);
+    k1[static_cast<std::size_t>(i)]   = 1 + (i % 20);
     vals[static_cast<std::size_t>(i)] = static_cast<sum_type>(1 + (i % 1000));
   }
   std::vector<int32_t> k2_pad(static_cast<std::size_t>(n));
-  std::vector<std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>, std::optional<sum_type>>>
+  std::vector<std::tuple<int64_t,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<sum_type>>>
     expected;
-  run_reference_rollup_int_keys(k0,
-                                all_true,
-                                k1,
-                                all_true,
-                                k2_pad,
-                                all_true,
-                                vals,
-                                all_true,
-                                {0, 1},
-                                false,
-                                expected);
+  run_reference_rollup_int_keys(
+    k0, all_true, k1, all_true, k2_pad, all_true, vals, all_true, {0, 1}, false, expected);
 
   cudf::test::fixed_width_column_wrapper<int32_t> w0(k0.begin(), k0.end());
   cudf::test::fixed_width_column_wrapper<int32_t> w1(k1.begin(), k1.end());
   cudf::test::fixed_width_column_wrapper<sum_type> wv(vals.begin(), vals.end());
   cudf::table_view const keys{{w0, w1}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, wv, {0, 1});
-  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_matches_expected(sorted, expected, 2);
 }
 
@@ -697,12 +686,16 @@ TEST_F(RollupTest, FusedKernelStyle_ThreeIntKeysRolledSum5000Rows)
   std::vector<sum_type> vals(static_cast<std::size_t>(n));
   std::vector<bool> const all_true(static_cast<std::size_t>(n), true);
   for (int i = 0; i < n; ++i) {
-    k0[static_cast<std::size_t>(i)] = 1 + (i % 10);
-    k1[static_cast<std::size_t>(i)] = 1 + (i % 20);
-    k2[static_cast<std::size_t>(i)] = 1 + (i % 5);
+    k0[static_cast<std::size_t>(i)]   = 1 + (i % 10);
+    k1[static_cast<std::size_t>(i)]   = 1 + (i % 20);
+    k2[static_cast<std::size_t>(i)]   = 1 + (i % 5);
     vals[static_cast<std::size_t>(i)] = static_cast<sum_type>(1 + (i % 1000));
   }
-  std::vector<std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>, std::optional<sum_type>>>
+  std::vector<std::tuple<int64_t,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<sum_type>>>
     expected;
   run_reference_rollup_int_keys(
     k0, all_true, k1, all_true, k2, all_true, vals, all_true, {0, 1, 2}, false, expected);
@@ -713,8 +706,8 @@ TEST_F(RollupTest, FusedKernelStyle_ThreeIntKeysRolledSum5000Rows)
   cudf::test::fixed_width_column_wrapper<sum_type> wv(vals.begin(), vals.end());
   cudf::table_view const keys{{w0, w1, w2}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, wv, {0, 1, 2});
-  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_matches_expected(sorted, expected, 3);
 }
 
@@ -726,34 +719,29 @@ TEST_F(RollupTest, FusedKernelStyle_SumProductPrecomputedColumn5000Rows)
   std::vector<sum_type> prod(static_cast<std::size_t>(n));
   std::vector<bool> const all_true(static_cast<std::size_t>(n), true);
   for (int i = 0; i < n; ++i) {
-    auto const m1 = 1 + (i % 1000);
-    auto const mm = static_cast<int32_t>(1 + (i % 100));
+    auto const m1                     = 1 + (i % 1000);
+    auto const mm                     = static_cast<int32_t>(1 + (i % 100));
     k0[static_cast<std::size_t>(i)]   = 1 + (i % 10);
     k1[static_cast<std::size_t>(i)]   = 1 + (i % 20);
     prod[static_cast<std::size_t>(i)] = static_cast<sum_type>(m1 * mm);
   }
   std::vector<int32_t> k2_pad(static_cast<std::size_t>(n));
-  std::vector<std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>, std::optional<sum_type>>>
+  std::vector<std::tuple<int64_t,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<sum_type>>>
     expected;
-  run_reference_rollup_int_keys(k0,
-                                all_true,
-                                k1,
-                                all_true,
-                                k2_pad,
-                                all_true,
-                                prod,
-                                all_true,
-                                {0, 1},
-                                false,
-                                expected);
+  run_reference_rollup_int_keys(
+    k0, all_true, k1, all_true, k2_pad, all_true, prod, all_true, {0, 1}, false, expected);
 
   cudf::test::fixed_width_column_wrapper<int32_t> w0(k0.begin(), k0.end());
   cudf::test::fixed_width_column_wrapper<int32_t> w1(k1.begin(), k1.end());
   cudf::test::fixed_width_column_wrapper<sum_type> wp(prod.begin(), prod.end());
   cudf::table_view const keys{{w0, w1}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, wp, {0, 1});
-  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_matches_expected(sorted, expected, 2);
 }
 
@@ -767,32 +755,37 @@ TEST_F(RollupTest, FusedKernelStyle_NullableKeyColumnsPartialNulls)
   std::vector<sum_type> vals(static_cast<std::size_t>(n));
   std::vector<bool> const mv(static_cast<std::size_t>(n), true);
   for (int i = 0; i < n; ++i) {
-    k0[static_cast<std::size_t>(i)] = 1 + (i % 15);
-    k1[static_cast<std::size_t>(i)] = 1 + (i % 15);
-    m0[static_cast<std::size_t>(i)] = (i % 5) != 0;
-    m1[static_cast<std::size_t>(i)] = (i % 7) != 0;
+    k0[static_cast<std::size_t>(i)]   = 1 + (i % 15);
+    k1[static_cast<std::size_t>(i)]   = 1 + (i % 15);
+    m0[static_cast<std::size_t>(i)]   = (i % 5) != 0;
+    m1[static_cast<std::size_t>(i)]   = (i % 7) != 0;
     vals[static_cast<std::size_t>(i)] = static_cast<sum_type>(1 + (i % 500));
   }
   std::vector<int32_t> k2_pad(static_cast<std::size_t>(n));
   std::vector<bool> m2_pad(static_cast<std::size_t>(n), true);
-  std::vector<std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>, std::optional<sum_type>>>
+  std::vector<std::tuple<int64_t,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<sum_type>>>
     expected;
-  run_reference_rollup_int_keys(
-    k0, m0, k1, m1, k2_pad, m2_pad, vals, mv, {0, 1}, false, expected);
+  run_reference_rollup_int_keys(k0, m0, k1, m1, k2_pad, m2_pad, vals, mv, {0, 1}, false, expected);
 
   auto const v0 = rollup_validity_u8(m0);
   auto const v1 = rollup_validity_u8(m1);
-  auto const w0 = std::all_of(m0.begin(), m0.end(), [](bool x) { return x; })
-                    ? cudf::test::fixed_width_column_wrapper<int32_t>(k0.begin(), k0.end())
-                    : cudf::test::fixed_width_column_wrapper<int32_t>(k0.begin(), k0.end(), v0.begin());
-  auto const w1 = std::all_of(m1.begin(), m1.end(), [](bool x) { return x; })
-                    ? cudf::test::fixed_width_column_wrapper<int32_t>(k1.begin(), k1.end())
-                    : cudf::test::fixed_width_column_wrapper<int32_t>(k1.begin(), k1.end(), v1.begin());
+  auto const w0 =
+    std::all_of(m0.begin(), m0.end(), [](bool x) { return x; })
+      ? cudf::test::fixed_width_column_wrapper<int32_t>(k0.begin(), k0.end())
+      : cudf::test::fixed_width_column_wrapper<int32_t>(k0.begin(), k0.end(), v0.begin());
+  auto const w1 =
+    std::all_of(m1.begin(), m1.end(), [](bool x) { return x; })
+      ? cudf::test::fixed_width_column_wrapper<int32_t>(k1.begin(), k1.end())
+      : cudf::test::fixed_width_column_wrapper<int32_t>(k1.begin(), k1.end(), v1.begin());
   cudf::test::fixed_width_column_wrapper<sum_type> wv(vals.begin(), vals.end());
   cudf::table_view const keys{{w0, w1}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, wv, {0, 1});
-  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_matches_expected(sorted, expected, 2);
 }
 
@@ -806,36 +799,32 @@ TEST_F(RollupTest, FusedKernelStyle_PartialNullMeasuresSumSkipsNulls)
   std::vector<bool> mv(static_cast<std::size_t>(n));
   std::vector<bool> const all_true(static_cast<std::size_t>(n), true);
   for (int i = 0; i < n; ++i) {
-    k0[static_cast<std::size_t>(i)] = 1 + (i % 10);
-    k1[static_cast<std::size_t>(i)] = 1 + (i % 20);
+    k0[static_cast<std::size_t>(i)]   = 1 + (i % 10);
+    k1[static_cast<std::size_t>(i)]   = 1 + (i % 20);
     vals[static_cast<std::size_t>(i)] = static_cast<sum_type>(1 + (i % 1000));
     mv[static_cast<std::size_t>(i)]   = (i % 4) != 0;
   }
   std::vector<int32_t> k2_pad(static_cast<std::size_t>(n));
-  std::vector<std::tuple<int64_t, std::optional<int32_t>, std::optional<int32_t>, std::optional<int32_t>, std::optional<sum_type>>>
+  std::vector<std::tuple<int64_t,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<int32_t>,
+                         std::optional<sum_type>>>
     expected;
-  run_reference_rollup_int_keys(k0,
-                                all_true,
-                                k1,
-                                all_true,
-                                k2_pad,
-                                all_true,
-                                vals,
-                                mv,
-                                {0, 1},
-                                false,
-                                expected);
+  run_reference_rollup_int_keys(
+    k0, all_true, k1, all_true, k2_pad, all_true, vals, mv, {0, 1}, false, expected);
 
   auto const vv = rollup_validity_u8(mv);
-  auto const wv = std::all_of(mv.begin(), mv.end(), [](bool x) { return x; })
-                    ? cudf::test::fixed_width_column_wrapper<sum_type>(vals.begin(), vals.end())
-                    : cudf::test::fixed_width_column_wrapper<sum_type>(vals.begin(), vals.end(), vv.begin());
+  auto const wv =
+    std::all_of(mv.begin(), mv.end(), [](bool x) { return x; })
+      ? cudf::test::fixed_width_column_wrapper<sum_type>(vals.begin(), vals.end())
+      : cudf::test::fixed_width_column_wrapper<sum_type>(vals.begin(), vals.end(), vv.begin());
   cudf::test::fixed_width_column_wrapper<int32_t> w0(k0.begin(), k0.end());
   cudf::test::fixed_width_column_wrapper<int32_t> w1(k1.begin(), k1.end());
   cudf::table_view const keys{{w0, w1}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, wv, {0, 1});
-  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_matches_expected(sorted, expected, 2);
 }
 
@@ -847,11 +836,12 @@ TEST_F(RollupTest, FusedKernelStyle_Int64KeysTwoRolledSum5000Rows)
   std::vector<int64_t> vals(static_cast<std::size_t>(n));
   std::vector<bool> const all_true(static_cast<std::size_t>(n), true);
   for (int i = 0; i < n; ++i) {
-    k0[static_cast<std::size_t>(i)] = 1 + (i % 100);
-    k1[static_cast<std::size_t>(i)] = 1 + (i % 100);
+    k0[static_cast<std::size_t>(i)]   = 1 + (i % 100);
+    k1[static_cast<std::size_t>(i)]   = 1 + (i % 100);
     vals[static_cast<std::size_t>(i)] = 1 + (i % 100000);
   }
-  std::vector<std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, sum_i64_val>> expected;
+  std::vector<std::tuple<int64_t, std::optional<int64_t>, std::optional<int64_t>, sum_i64_val>>
+    expected;
   run_reference_rollup_i64_2(k0, all_true, k1, all_true, vals, all_true, expected);
 
   cudf::test::fixed_width_column_wrapper<int64_t> w0(k0.begin(), k0.end());
@@ -863,9 +853,10 @@ TEST_F(RollupTest, FusedKernelStyle_Int64KeysTwoRolledSum5000Rows)
   std::vector<cudf::groupby::aggregation_request> requests(1);
   requests[0].values = wv;
   requests[0].aggregations.push_back(cudf::make_sum_aggregation<cudf::groupby_aggregation>());
-  auto [out_keys_group_id, agg_out] = roller.rollup(rolled, requests, cudf::test::get_default_stream());
+  auto [out_keys_group_id, agg_out] =
+    roller.rollup(rolled, requests, cudf::test::get_default_stream());
   auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_i64_2_matches(sorted, expected);
 }
 
@@ -884,7 +875,8 @@ TEST_F(RollupTest, FusedKernelStyle_StringKeysTwoRolledSum2000Rows)
     vals[static_cast<std::size_t>(i)] = static_cast<sum_type>(1 + (i % 1000));
   }
 
-  std::vector<std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, sum_type>> expected;
+  std::vector<std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>, sum_type>>
+    expected;
   run_reference_rollup_string2(k0, all_true, k1, all_true, vals, all_true, expected);
 
   cudf::test::strings_column_wrapper w0(k0.begin(), k0.end());
@@ -892,7 +884,7 @@ TEST_F(RollupTest, FusedKernelStyle_StringKeysTwoRolledSum2000Rows)
   cudf::test::fixed_width_column_wrapper<sum_type> wv(vals.begin(), vals.end());
   cudf::table_view const keys{{w0, w1}};
   auto [out_keys_group_id, agg_out] = run_rollup_sum(keys, wv, {0, 1});
-  auto const sorted = sort_rollup_output_for_compare(out_keys_group_id->view(),
-                                                      agg_out.front().results.front()->view());
+  auto const sorted                 = sort_rollup_output_for_compare(out_keys_group_id->view(),
+                                                     agg_out.front().results.front()->view());
   assert_sorted_rollup_string2_matches(sorted, expected);
 }

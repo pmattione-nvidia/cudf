@@ -8,12 +8,11 @@
 // index, compact to dense rows, materialize output keys (nulls where keys are rolled away), append
 // group_id, then reuse hash aggregate finalize / compound-agg handling.
 
-#include "rollup_aggregate_kernel.cuh"
-
 #include "../common/utils.hpp"
 #include "../hash/extract_single_pass_aggs.hpp"
 #include "../hash/hash_compound_agg_finalizer.hpp"
 #include "../hash/output_utils.hpp"
+#include "rollup_aggregate_kernel.cuh"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
@@ -34,13 +33,11 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 
-#include <cuco/static_set.cuh>
-
-#include <cuda_runtime.h>
-
 #include <rmm/exec_policy.hpp>
 #include <rmm/mr/polymorphic_allocator.hpp>
 
+#include <cuco/static_set.cuh>
+#include <cuda_runtime.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
@@ -55,7 +52,8 @@ namespace cudf::groupby::detail::hash {
 
 /**
  * @brief For each output key row (one per unique virtual index), mark BOOL8 valid where the key
- *        column is active for that row's grouping level; leave null where the column is rolled away.
+ *        column is active for that row's grouping level; leave null where the column is rolled
+ * away.
  */
 CUDF_KERNEL void rollup_active_key_column_kernel(mutable_column_device_view active_bool,
                                                  size_type const* unique_virtual,
@@ -68,7 +66,8 @@ CUDF_KERNEL void rollup_active_key_column_kernel(mutable_column_device_view acti
   auto const i = static_cast<size_type>(blockDim.x * blockIdx.x + threadIdx.x);
   if (i >= num_unique) { return; }
 
-  // Decode virtual index to grouping level; BOOL8 stays null if this key column is rolled off at that level.
+  // Decode virtual index to grouping level; BOOL8 stays null if this key column is rolled off at
+  // that level.
   auto const v     = unique_virtual[i];
   auto const level = v % num_levels;
   if (rollup_is_column_active(rolled_rank_c, num_rolled, level)) {
@@ -83,19 +82,22 @@ namespace {
 
 using cudf::size_type;
 
-// Row bitmask for EXCLUDE_NULL_KEYS when keys have multiple columns (single-column fast path above).
+// Row bitmask for EXCLUDE_NULL_KEYS when keys have multiple columns (single-column fast path
+// above).
 [[nodiscard]] std::pair<rmm::device_buffer, cudf::bitmask_type const*> rollup_keys_row_bitmask(
   cudf::table_view const& keys,
   bool exclude_null_keys,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  // Compound-agg finalizer uses nullptr to mean "no per-row key null filter" (include null keys or no nulls).
+  // Compound-agg finalizer uses nullptr to mean "no per-row key null filter" (include null keys or
+  // no nulls).
   if (not exclude_null_keys or not cudf::has_nulls(keys)) {
     return {rmm::device_buffer{}, nullptr};
   }
 
-  // One key column: row is excluded iff that column is null; reuse mask or align to offset 0 via copy.
+  // One key column: row is excluded iff that column is null; reuse mask or align to offset 0 via
+  // copy.
   if (keys.num_columns() == 1) {
     auto const& keys_col = keys.column(0);
     if (keys_col.offset() == 0) { return {rmm::device_buffer{}, keys_col.null_mask()}; }
@@ -104,15 +106,16 @@ using cudf::size_type;
     return {std::move(null_mask_data), null_mask};
   }
 
-  // Multiple keys: a row is in the group iff no key column is null at that row (bitwise AND of null masks).
+  // Multiple keys: a row is in the group iff no key column is null at that row (bitwise AND of null
+  // masks).
   auto [null_mask_data, null_count] = cudf::bitmask_and(keys, stream, mr);
   if (null_count == 0) { return {rmm::device_buffer{}, nullptr}; }
   auto const null_mask = static_cast<cudf::bitmask_type const*>(null_mask_data.data());
   return {std::move(null_mask_data), null_mask};
 }
 
-// One output row per unique virtual index: gather each key column from the input row (v / num_levels),
-// then AND with an active-column BOOL mask so rolled-away keys become null.
+// One output row per unique virtual index: gather each key column from the input row (v /
+// num_levels), then AND with an active-column BOOL mask so rolled-away keys become null.
 [[nodiscard]] std::unique_ptr<cudf::table> materialize_rollup_output_keys(
   cudf::table_view const& keys_table,
   rmm::device_uvector<size_type> const& d_unique_virtual,
@@ -125,17 +128,19 @@ using cudf::size_type;
   auto const num_unique = static_cast<size_type>(d_unique_virtual.size());
   if (num_unique == 0) { return cudf::empty_like(keys_table); }
 
-  // Map each canonical virtual index to its source input row: virtual = row * num_levels + level, so row = v / num_levels.
+  // Map each canonical virtual index to its source input row: virtual = row * num_levels + level,
+  // so row = v / num_levels.
   rmm::device_uvector<size_type> d_input_row(num_unique, stream);
-  thrust::transform(
-    rmm::exec_policy_nosync(stream),
-    d_unique_virtual.begin(),
-    d_unique_virtual.end(),
-    d_input_row.begin(),
-    [num_levels] __device__(size_type const v) { return v / num_levels; });
+  thrust::transform(rmm::exec_policy_nosync(stream),
+                    d_unique_virtual.begin(),
+                    d_unique_virtual.end(),
+                    d_input_row.begin(),
+                    [num_levels] __device__(size_type const v) { return v / num_levels; });
 
-  // Gather uses these row ids in order; indices are in-range because virtual indices are derived from input rows.
-  auto const gather_span = cudf::device_span<size_type const>{d_input_row.data(), d_input_row.size()};
+  // Gather uses these row ids in order; indices are in-range because virtual indices are derived
+  // from input rows.
+  auto const gather_span =
+    cudf::device_span<size_type const>{d_input_row.data(), d_input_row.size()};
 
   std::vector<std::unique_ptr<cudf::column>> out_cols;
   out_cols.reserve(static_cast<std::size_t>(keys_table.num_columns()));
@@ -145,37 +150,32 @@ using cudf::size_type;
     static_cast<int>(cudf::util::div_rounding_up_safe(num_unique, key_k_threads));
 
   for (size_type c = 0; c < keys_table.num_columns(); ++c) {
-    // Pull key values from the original table for each output row (one row per unique virtual index).
-    auto gathered_tbl = cudf::detail::gather(
-      cudf::table_view{{keys_table.column(c)}},
-      gather_span,
-      cudf::out_of_bounds_policy::DONT_CHECK,
-      cudf::negative_index_policy::NOT_ALLOWED,
-      stream,
-      mr);
+    // Pull key values from the original table for each output row (one row per unique virtual
+    // index).
+    auto gathered_tbl = cudf::detail::gather(cudf::table_view{{keys_table.column(c)}},
+                                             gather_span,
+                                             cudf::out_of_bounds_policy::DONT_CHECK,
+                                             cudf::negative_index_policy::NOT_ALLOWED,
+                                             stream,
+                                             mr);
 
     auto released = gathered_tbl->release();
     auto gathered = std::move(released.front());
 
-    // BOOL8 marks where this column participates at each row's grouping level; starts all-null, kernel sets valid+1 where active.
-    auto active = cudf::make_numeric_column(cudf::data_type{cudf::type_id::BOOL8},
-                                            num_unique,
-                                            cudf::mask_state::ALL_NULL,
-                                            stream,
-                                            mr);
+    // BOOL8 marks where this column participates at each row's grouping level; starts all-null,
+    // kernel sets valid+1 where active.
+    auto active = cudf::make_numeric_column(
+      cudf::data_type{cudf::type_id::BOOL8}, num_unique, cudf::mask_state::ALL_NULL, stream, mr);
 
     auto d_active        = cudf::mutable_column_device_view::create(active->mutable_view(), stream);
     auto const rolled_rc = h_rolled_rank[static_cast<std::size_t>(c)];
-    cudf::groupby::detail::hash::rollup_active_key_column_kernel<<<key_k_grid, key_k_threads, 0, stream.value()>>>(
-      *d_active,
-      d_unique_virtual.data(),
-      num_unique,
-      rolled_rc,
-      num_rolled,
-      num_levels);
+    cudf::groupby::detail::hash::
+      rollup_active_key_column_kernel<<<key_k_grid, key_k_threads, 0, stream.value()>>>(
+        *d_active, d_unique_virtual.data(), num_unique, rolled_rc, num_rolled, num_levels);
     CUDF_CUDA_TRY(cudaPeekAtLastError());
 
-    // Output key is null where the column is inactive (rolled) or where the gathered value was null.
+    // Output key is null where the column is inactive (rolled) or where the gathered value was
+    // null.
     auto const [merged_mask, null_count] =
       cudf::bitmask_and(cudf::table_view{{gathered->view(), active->view()}}, stream, mr);
     gathered->set_null_mask(std::move(merged_mask), null_count);
@@ -185,33 +185,34 @@ using cudf::size_type;
   return std::make_unique<cudf::table>(std::move(out_cols));
 }
 
-// INT64 per output row: `(1 << grouping_level) - 1` encodes which rolled keys are active at that level.
+// INT64 per output row: `(1 << grouping_level) - 1` encodes which rolled keys are active at that
+// level.
 [[nodiscard]] std::unique_ptr<cudf::column> make_group_id_column(
   rmm::device_uvector<size_type> const& unique_virtual,
   size_type num_levels,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  CUDF_EXPECTS(num_levels > 0 && num_levels < 63,
-               "rollup: num_levels out of range for group_id");
+  CUDF_EXPECTS(num_levels > 0 && num_levels < 63, "rollup: num_levels out of range for group_id");
   auto const n = static_cast<size_type>(unique_virtual.size());
   if (n == 0) { return cudf::make_empty_column(cudf::type_id::INT64); }
 
-  // No nulls: group_id is a pure function of grouping level; consumers use it to tell rollup levels apart.
+  // No nulls: group_id is a pure function of grouping level; consumers use it to tell rollup levels
+  // apart.
   auto out = cudf::make_numeric_column(
     cudf::data_type{cudf::type_id::INT64}, n, cudf::mask_state::UNALLOCATED, stream, mr);
   auto* d_out = out->mutable_view().data<int64_t>();
 
-  // Per output row, level = v % num_levels; store a small bitmask (1<<level)-1 identifying which rolled dims exist at that level.
-  thrust::transform(
-    rmm::exec_policy_nosync(stream),
-    unique_virtual.begin(),
-    unique_virtual.end(),
-    d_out,
-    [num_levels] __device__(size_type const v) -> int64_t {
-      auto const g = v % num_levels;
-      return static_cast<int64_t>((static_cast<std::uint64_t>(1) << g) - 1);
-    });
+  // Per output row, level = v % num_levels; store a small bitmask (1<<level)-1 identifying which
+  // rolled dims exist at that level.
+  thrust::transform(rmm::exec_policy_nosync(stream),
+                    unique_virtual.begin(),
+                    unique_virtual.end(),
+                    d_out,
+                    [num_levels] __device__(size_type const v) -> int64_t {
+                      auto const g = v % num_levels;
+                      return static_cast<int64_t>((static_cast<std::uint64_t>(1) << g) - 1);
+                    });
   return out;
 }
 
@@ -253,7 +254,8 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
 {
   CUDF_FUNC_RANGE();
 
-  // Hash rollup shares kernels and storage layouts with single-pass hash aggregate; nested keys and unsupported aggs bail early.
+  // Hash rollup shares kernels and storage layouts with single-pass hash aggregate; nested keys and
+  // unsupported aggs bail early.
   CUDF_EXPECTS(not cudf::has_nested_columns(keys),
                "rollup: nested key columns are not supported in the hash path");
   CUDF_EXPECTS(not requests.empty(), "rollup aggregate requires at least one aggregation request");
@@ -265,7 +267,8 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
     cudf::scoped_range const empty_range{"detail::hash::rollup: empty keys"};
     cudf::groupby::groupby gb(keys, include_null_keys, sorted::NO, {}, {});
 
-    // No groups to form; still produce the same result schema as non-empty rollup (keys + group_id + agg columns).
+    // No groups to form; still produce the same result schema as non-empty rollup (keys + group_id
+    // + agg columns).
     auto empty_out = gb.aggregate(requests, stream, mr);
     auto group_id  = cudf::make_empty_column(cudf::type_id::INT64);
     empty_out.first =
@@ -278,7 +281,8 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
     cudf::detail::row::equality::preprocessed_table::create(keys, stream);
   auto const keys_dview = static_cast<table_device_view>(*preprocessed_keys);
 
-  // Virtual index space: each input row spawns num_levels rows (one per rollup granularity); total slots = rows * levels.
+  // Virtual index space: each input row spawns num_levels rows (one per rollup granularity); total
+  // slots = rows * levels.
   auto const num_input_rows = static_cast<size_type>(keys.num_rows());
   auto const num_rolled     = static_cast<size_type>(rolled_up_key_column_indices.size());
   auto const num_levels     = rollup_num_levels(num_rolled);
@@ -291,10 +295,12 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
     h_rank[static_cast<std::size_t>(rolled_up_key_column_indices[p])] = static_cast<size_type>(p);
   }
 
-  // Device copy so kernels can test column activity without host access (rolled_rank[col] vs grouping level).
+  // Device copy so kernels can test column activity without host access (rolled_rank[col] vs
+  // grouping level).
   auto d_rolled_rank = cudf::detail::make_device_uvector_async(h_rank, stream, mr);
 
-  // Flatten requests into one values table, aggregation kinds, and host aggs for finalize (same as hash aggregate).
+  // Flatten requests into one values table, aggregation kinds, and host aggs for finalize (same as
+  // hash aggregate).
   auto const [values, agg_kinds, aggs, is_agg_intermediate, has_compound_aggs] =
     cudf::groupby::detail::hash::extract_single_pass_aggs(requests, stream);
   CUDF_EXPECTS(values.num_rows() == static_cast<size_type>(keys.num_rows()),
@@ -309,12 +315,15 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
     stream,
     mr);
 
-  // Device views: read value rows from the input table, read/write aggregate partials in the sparse results table.
-  auto d_input_values  = table_device_view::create(values, stream);
-  auto d_output_values = mutable_table_device_view::create(sparse_agg_results->mutable_view(), stream);
-  auto d_agg_kinds     = cudf::detail::make_device_uvector_async(agg_kinds, stream, mr);
+  // Device views: read value rows from the input table, read/write aggregate partials in the sparse
+  // results table.
+  auto d_input_values = table_device_view::create(values, stream);
+  auto d_output_values =
+    mutable_table_device_view::create(sparse_agg_results->mutable_view(), stream);
+  auto d_agg_kinds = cudf::detail::make_device_uvector_async(agg_kinds, stream, mr);
 
-  // Functors encode virtual-index equality and hash using only keys active at that virtual row's level (see rollup_hash.cuh).
+  // Functors encode virtual-index equality and hash using only keys active at that virtual row's
+  // level (see rollup_hash.cuh).
   rollup_row_equal row_equal{
     keys_dview, key_nullate, null_equality::EQUAL, num_levels, num_rolled, d_rolled_rank.data()};
   rollup_row_hasher row_hash{keys_dview, key_nullate, num_levels, num_rolled, d_rolled_rank.data()};
@@ -323,7 +332,8 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
   using probing_scheme_t = cuco::linear_probing<1, rollup_row_hasher>;
   probing_scheme_t probing_scheme{row_hash};
 
-  // Device-wide set: payload is the winning virtual index for each distinct (active keys, level) equivalence class.
+  // Device-wide set: payload is the winning virtual index for each distinct (active keys, level)
+  // equivalence class.
   using rollup_global_set_t = cuco::static_set<size_type,
                                                cuco::extent<int64_t>,
                                                cuda::thread_scope_device,
@@ -332,7 +342,8 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
                                                rmm::mr::polymorphic_allocator<char>,
                                                cuco::storage<1>>;
 
-  // Set stores canonical virtual indices (size_type); capacity is upper bound count of distinct groups (<= num_virtual).
+  // Set stores canonical virtual indices (size_type); capacity is upper bound count of distinct
+  // groups (<= num_virtual).
   auto set = rollup_global_set_t{cuco::extent<int64_t>{static_cast<int64_t>(num_virtual)},
                                  cudf::detail::CUCO_DESIRED_LOAD_FACTOR,
                                  cuco::empty_key{cudf::detail::CUDF_SIZE_TYPE_SENTINEL},
@@ -346,16 +357,18 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
   // EXCLUDE matches hash groupby: skip virtual rows whose active key slice contains a null.
   bool const exclude_null_keys = include_null_keys == null_policy::EXCLUDE;
 
-  // insert_and_find ref: map each probe to a slot and merge aggregates when keys match an existing virtual index.
+  // insert_and_find ref: map each probe to a slot and merge aggregates when keys match an existing
+  // virtual index.
   auto set_ref_insert_find = set.ref(cuco::op::insert_and_find);
-  constexpr int block_size   = 256;
-  size_type const num_sms      = std::max(device_multiprocessor_count(), size_type{1});
+  constexpr int block_size = 256;
+  size_type const num_sms  = std::max(device_multiprocessor_count(), size_type{1});
   size_type const rows_per_block =
     num_input_rows > 0 ? cudf::util::div_rounding_up_safe(num_input_rows, num_sms) : 0;
   int const grid_size = static_cast<int>(num_sms);
   if (num_input_rows > 0) {
     cudf::scoped_range const kernel_range{"detail::hash::rollup: insert_find kernel"};
-    // One block per SM; each thread walks a chunk of input rows and all levels, hashing into the set and updating sparse aggs.
+    // One block per SM; each thread walks a chunk of input rows and all levels, hashing into the
+    // set and updating sparse aggs.
     rollup_aggregate_insert_find_kernel<<<grid_size, block_size, 0, stream.value()>>>(
       num_input_rows,
       rows_per_block,
@@ -371,10 +384,13 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
     CUDF_CUDA_TRY(cudaPeekAtLastError());
   }
 
-  // Buffer sized to worst case (every virtual slot occupied); retrieve_all writes unique keys then we shrink to actual count.
-  rmm::device_uvector<size_type> unique_virtual_indices(static_cast<std::size_t>(num_virtual), stream, mr);
+  // Buffer sized to worst case (every virtual slot occupied); retrieve_all writes unique keys then
+  // we shrink to actual count.
+  rmm::device_uvector<size_type> unique_virtual_indices(
+    static_cast<std::size_t>(num_virtual), stream, mr);
   {
-    cudf::scoped_range const retrieve_range{"detail::hash::rollup: retrieve unique virtual indices"};
+    cudf::scoped_range const retrieve_range{
+      "detail::hash::rollup: retrieve unique virtual indices"};
     auto const keys_end = set.retrieve_all(unique_virtual_indices.begin(), stream.value());
     unique_virtual_indices.resize(
       static_cast<std::size_t>(std::distance(unique_virtual_indices.begin(), keys_end)), stream);
@@ -384,38 +400,45 @@ std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> rollup(
   std::unique_ptr<table> unique_keys_table;
   {
     cudf::scoped_range const densify_range{"detail::hash::rollup: densify keys and aggregates"};
-    // Compact sparse aggregate rows: keep only slots that correspond to distinct groups (order matches retrieve_all).
-    dense_agg_table = cudf::detail::gather(
-      sparse_agg_results->view(),
-      cudf::device_span<size_type const>{unique_virtual_indices.data(), unique_virtual_indices.size()},
-      cudf::out_of_bounds_policy::DONT_CHECK,
-      cudf::negative_index_policy::NOT_ALLOWED,
-      stream,
-      mr);
+    // Compact sparse aggregate rows: keep only slots that correspond to distinct groups (order
+    // matches retrieve_all).
+    dense_agg_table =
+      cudf::detail::gather(sparse_agg_results->view(),
+                           cudf::device_span<size_type const>{unique_virtual_indices.data(),
+                                                              unique_virtual_indices.size()},
+                           cudf::out_of_bounds_policy::DONT_CHECK,
+                           cudf::negative_index_policy::NOT_ALLOWED,
+                           stream,
+                           mr);
 
-    // Build key columns aligned to dense output rows; null out rolled-away dimensions per grouping level.
-    unique_keys_table =
-      materialize_rollup_output_keys(keys, unique_virtual_indices, num_levels, num_rolled, h_rank, stream, mr);
+    // Build key columns aligned to dense output rows; null out rolled-away dimensions per grouping
+    // level.
+    unique_keys_table = materialize_rollup_output_keys(
+      keys, unique_virtual_indices, num_levels, num_rolled, h_rank, stream, mr);
 
-    // Append metadata column so callers can recover rollup level without re-deriving from key nulls alone.
+    // Append metadata column so callers can recover rollup level without re-deriving from key nulls
+    // alone.
     auto group_id_col = make_group_id_column(unique_virtual_indices, num_levels, stream, mr);
-    unique_keys_table =
-      append_column_after_keys(std::move(unique_keys_table), std::move(group_id_col), keys.num_columns());
+    unique_keys_table = append_column_after_keys(
+      std::move(unique_keys_table), std::move(group_id_col), keys.num_columns());
   }
 
   std::vector<aggregation_result> agg_results;
   {
     cudf::scoped_range const finalize_range{"detail::hash::rollup: finalize aggregations"};
-    // Populate cache from dense single-pass columns (null counts, typed outputs) using the same code path as hash aggregate.
+    // Populate cache from dense single-pass columns (null counts, typed outputs) using the same
+    // code path as hash aggregate.
     cudf::detail::result_cache cache(requests.size());
     cudf::groupby::detail::hash::finalize_output(values, aggs, dense_agg_table, &cache, stream);
 
-    // Compound aggs may need to drop rows where original keys were null; bitmask mirrors hash aggregate behavior.
+    // Compound aggs may need to drop rows where original keys were null; bitmask mirrors hash
+    // aggregate behavior.
     auto [row_bitmask_storage, row_bitmask] =
       rollup_keys_row_bitmask(keys, exclude_null_keys, stream, mr);
 
     if (has_compound_aggs) {
-      // Dispatch each compound aggregation kind to a finalizer that reads cached intermediates (same as hash groupby).
+      // Dispatch each compound aggregation kind to a finalizer that reads cached intermediates
+      // (same as hash groupby).
       for (auto const& request : requests) {
         auto const finalizer = cudf::groupby::detail::hash::hash_compound_agg_finalizer(
           request.values, &cache, row_bitmask, stream, mr);

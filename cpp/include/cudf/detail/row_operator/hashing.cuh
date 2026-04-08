@@ -155,8 +155,7 @@ class element_hasher_adapter {
         auto validity_it = detail::make_validity_iterator<true>(curr_col);
         hash             = detail::accumulate(
           validity_it, validity_it + curr_col.size(), hash, [](auto hash, auto is_valid) {
-            return cudf::hashing::detail::hash_combine(hash,
-                                                       is_valid ? NON_NULL_HASH : NULL_HASH);
+            return cudf::hashing::detail::hash_combine(hash, is_valid ? NON_NULL_HASH : NULL_HASH);
           });
       }
       if (curr_col.type().id() == type_id::STRUCT) {

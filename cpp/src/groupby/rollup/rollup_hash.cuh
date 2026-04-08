@@ -22,7 +22,8 @@ namespace cudf::groupby::detail::hash {
  * @brief Virtual row index layout: `virtual_index = input_row_index * num_levels + grouping_level`.
  *
  * `num_levels` is `rolled_key_count + 1`. `grouping_level` 0 is the finest grouping (all rolled
- * keys participate); `grouping_level == rolled_key_count` is coarsest (only fixed keys participate).
+ * keys participate); `grouping_level == rolled_key_count` is coarsest (only fixed keys
+ * participate).
  */
 [[nodiscard]] inline size_type rollup_num_levels(size_type num_rolled_keys)
 {
@@ -84,11 +85,10 @@ using rollup_column_element_hasher_adapter =
                                                   nullate::DYNAMIC>;
 
 /** Same device element equality as hash `aggregate` (`element_comparator` + `type_dispatcher`). */
-using rollup_key_element_equal =
-  cudf::detail::row::equality::element_comparator<
-    true,
-    nullate::DYNAMIC,
-    cudf::detail::row::equality::nan_equal_physical_equality_comparator>;
+using rollup_key_element_equal = cudf::detail::row::equality::element_comparator<
+  true,
+  nullate::DYNAMIC,
+  cudf::detail::row::equality::nan_equal_physical_equality_comparator>;
 
 }  // namespace
 
@@ -98,8 +98,8 @@ using rollup_key_element_equal =
  * Decodes `virtual_ix` into `(input_row, grouping_level)`, combines `grouping_level` into the hash,
  * then hashes each key column that is *active* at that level (see `rollup_is_column_active`) in
  * column order, using the same element hashing as hash `aggregate` (`element_hasher_adapter` +
- * `type_dispatcher`). Inactive columns are omitted so two virtual rows that differ only on rolled-away
- * keys collide and merge in the set.
+ * `type_dispatcher`). Inactive columns are omitted so two virtual rows that differ only on
+ * rolled-away keys collide and merge in the set.
  */
 struct rollup_row_hasher {
   table_device_view table;
@@ -108,8 +108,8 @@ struct rollup_row_hasher {
   size_type num_rolled{};
   size_type const* rolled_rank{};
 
-  using result_type = cuda::std::invoke_result_t<cudf::hashing::detail::default_hash<int32_t>,
-                                                 int32_t>;
+  using result_type =
+    cuda::std::invoke_result_t<cudf::hashing::detail::default_hash<int32_t>, int32_t>;
 
   __device__ result_type operator()(size_type const virtual_ix) const noexcept
   {
@@ -124,10 +124,12 @@ struct rollup_row_hasher {
     for (size_type col = 0; col < table.num_columns(); ++col) {
       if (not rollup_is_column_active(rolled_rank[col], num_rolled, grouping_level)) { continue; }
 
-      auto const& column = table.column(col);
+      auto const& column  = table.column(col);
       auto const col_hash = cudf::type_dispatcher<cudf::dispatch_storage_type>(
-        column.type(), rollup_column_element_hasher_adapter{check_nullness, cudf::DEFAULT_HASH_SEED},
-        column, row);
+        column.type(),
+        rollup_column_element_hasher_adapter{check_nullness, cudf::DEFAULT_HASH_SEED},
+        column,
+        row);
       h = cudf::hashing::detail::hash_combine(h, col_hash);
     }
     return h;
@@ -137,9 +139,10 @@ struct rollup_row_hasher {
 /**
  * @brief Equality predicate for `cuco::static_set` on virtual indices.
  *
- * Two indices are equal iff they map to the same `grouping_level` and, for every key column active at
- * that level, the underlying input rows have equal elements under the same null / NaN policy as hash
- * `aggregate` (`rollup_key_element_equal`). Inactive columns are ignored, matching `rollup_row_hasher`.
+ * Two indices are equal iff they map to the same `grouping_level` and, for every key column active
+ * at that level, the underlying input rows have equal elements under the same null / NaN policy as
+ * hash `aggregate` (`rollup_key_element_equal`). Inactive columns are ignored, matching
+ * `rollup_row_hasher`.
  */
 struct rollup_row_equal {
   table_device_view table;
@@ -160,7 +163,7 @@ struct rollup_row_equal {
     for (size_type col = 0; col < table.num_columns(); ++col) {
       if (not rollup_is_column_active(rolled_rank[col], num_rolled, level1)) { continue; }
 
-      auto const& c   = table.column(col);
+      auto const& c = table.column(col);
       // Compare row r1 vs r2 in column c; dispatcher picks physical equality for the column type.
       bool const c_eq = cudf::type_dispatcher(
         c.type(), rollup_key_element_equal{check_nullness, c, c, null_keys_are_equal}, r1, r2);

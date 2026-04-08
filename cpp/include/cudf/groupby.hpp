@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -187,11 +187,11 @@ class groupby {
    * `aggregate`.
    *
    * Implementation (hash path only; `_keys_are_sorted` must be `sorted::NO`): validates indices and
-   * requests, then dispatches to `cudf::groupby::detail::hash::rollup`. That path expands each input
-   * row into one virtual row per grouping level, probes a device hash set of virtual indices keyed
-   * by active keys and level, aggregates into a sparse then dense result table, materializes output
-   * key columns with nulls where rolled keys are inactive, appends an INT64 `group_id` bitmask column,
-   * and runs the same finalize path as hash `aggregate`.
+   * requests, then dispatches to `cudf::groupby::detail::hash::rollup`. That path expands each
+   * input row into one virtual row per grouping level, probes a device hash set of virtual indices
+   * keyed by active keys and level, aggregates into a sparse then dense result table, materializes
+   * output key columns with nulls where rolled keys are inactive, appends an INT64 `group_id`
+   * bitmask column, and runs the same finalize path as hash `aggregate`.
    *
    * @return Key columns, then `group_id` (INT64), then one `aggregation_result` per
    * request.

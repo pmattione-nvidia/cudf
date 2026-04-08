@@ -44,9 +44,8 @@ CUDF_KERNEL void rollup_aggregate_insert_find_kernel(size_type num_input_rows,
 
     for (size_type group_id = 0; group_id < num_levels; ++group_id) {
       size_type const virtual_ix = row * num_levels + group_id;
-      if (exclude_null_keys &&
-          rollup_skip_virtual_row_for_null_exclude(
-            keys_dview, rolled_rank, num_rolled, num_levels, virtual_ix)) {
+      if (exclude_null_keys && rollup_skip_virtual_row_for_null_exclude(
+                                 keys_dview, rolled_rank, num_rolled, num_levels, virtual_ix)) {
         continue;
       }
 
