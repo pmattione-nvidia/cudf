@@ -101,13 +101,18 @@ class element_hasher {
  *
  * @tparam hash_function Hash functor to use for hashing elements.
  * @tparam Nullate A cudf::nullate type describing whether to check for nulls.
+ * @tparam has_nested When false, `type_dispatcher` does not dispatch list/struct types (must not
+ *         appear in key columns for that specialization).
  */
-template <template <typename> class hash_function, typename Nullate>
+template <template <typename> class hash_function, typename Nullate, bool has_nested = true>
 class device_row_hasher {
   friend class row_hasher;
 
  public:
   using result_type = cuda::std::invoke_result_t<hash_function<int32_t>, int32_t>;
+
+  /// Matches the `has_nested` class template parameter (for probing / cache wrappers).
+  static constexpr bool has_nested_v = has_nested;
 
   /**
    * @brief Return the hash value of a row in the given table.
@@ -118,7 +123,7 @@ class device_row_hasher {
   __device__ result_type operator()(size_type row_index) const noexcept
   {
     auto const hasher = [row_index, this](auto const& column) {
-      return cudf::type_dispatcher<dispatch_storage_type>(
+      return cudf::type_dispatcher<dispatch_storage_type, has_nested>(
         column.type(), element_hasher_adapter{_check_nulls, _seed}, column, row_index);
     };
 
@@ -167,7 +172,7 @@ class device_row_hasher {
       if (_check_nulls && col.is_null(row_index)) { return NULL_HASH; }
 
       auto const keys = col.child(dictionary_column_view::keys_column_index);
-      return type_dispatcher<dispatch_storage_type>(
+      return type_dispatcher<dispatch_storage_type, has_nested>(
         keys.type(),
         _element_hasher,
         keys,
@@ -177,7 +182,15 @@ class device_row_hasher {
     template <typename T>
     __device__ result_type operator()(column_device_view const& col,
                                       size_type row_index) const noexcept
-      requires(cudf::is_nested<T>())
+      requires(cudf::is_nested<T>() && !has_nested)
+    {
+      CUDF_UNREACHABLE("Nested type in hash requires has_nested.");
+    }
+
+    template <typename T>
+    __device__ result_type operator()(column_device_view const& col,
+                                      size_type row_index) const noexcept
+      requires(cudf::is_nested<T>() && has_nested)
     {
       auto hash                   = result_type{0};
       column_device_view curr_col = col.slice(row_index, 1);
@@ -206,7 +219,10 @@ class device_row_hasher {
       for (int i = 0; i < curr_col.size(); ++i) {
         hash = cudf::hashing::detail::hash_combine(
           hash,
-          type_dispatcher<dispatch_void_if_nested>(curr_col.type(), _element_hasher, curr_col, i));
+          type_dispatcher<dispatch_void_if_nested, has_nested>(curr_col.type(),
+                                                               _element_hasher,
+                                                               curr_col,
+                                                               i));
       }
       return hash;
     }
@@ -263,22 +279,24 @@ class row_hasher {
    * Returns a unary callable, `F`, where `F(i)` returns the hash value of row i.
    *
    * @tparam hash_function Hash functor to use for hashing elements
-   * @tparam DeviceRowHasher The device row hasher type to use
+   * @tparam has_nested Whether list/struct columns are dispatched when hashing (see device_row_hasher)
+   * @tparam DeviceRowHasher Device row hasher class template (hash_function, Nullate, has_nested)
    * @tparam Nullate A cudf::nullate type describing whether to check for nulls
    *
    * @param nullate Indicates if any input column contains nulls
    * @param seed The seed to use for the hash function
    * @return A hash operator to use on the device
    */
-  template <
-    template <typename> class hash_function = cudf::hashing::detail::default_hash,
-    template <template <typename> class, typename> class DeviceRowHasher = device_row_hasher,
-    typename Nullate>
-  DeviceRowHasher<hash_function, Nullate> device_hasher(
+  template <template <typename> class hash_function = cudf::hashing::detail::default_hash,
+            bool has_nested = true,
+            template <template <typename> class, typename, bool>
+            class DeviceRowHasher = device_row_hasher,
+            typename Nullate>
+  DeviceRowHasher<hash_function, Nullate, has_nested> device_hasher(
     Nullate nullate                                                  = {},
     cuda::std::invoke_result_t<hash_function<int32_t>, int32_t> seed = DEFAULT_HASH_SEED) const
   {
-    return DeviceRowHasher<hash_function, Nullate>(nullate, *d_t, seed);
+    return DeviceRowHasher<hash_function, Nullate, has_nested>(nullate, *d_t, seed);
   }
 
  private:

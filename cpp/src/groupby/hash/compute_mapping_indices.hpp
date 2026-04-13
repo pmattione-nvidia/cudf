@@ -16,10 +16,10 @@ namespace cudf::groupby::detail::hash {
  * @brief Computes the maximum number of active blocks of the mapping indices kernel that can be
  * executed on the underlying device.
  */
-template <class SetRef>
+template <class SetRef, bool has_nested>
 [[nodiscard]] int32_t max_active_blocks_mapping_kernel();
 
-template <class SetRef>
+template <class SetRef, bool has_nested>
 void compute_mapping_indices(size_type grid_size,
                              size_type num_rows,
                              SetRef global_set,

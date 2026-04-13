@@ -148,14 +148,26 @@ rmm::device_uvector<size_type> extract_populated_keys(SetType const& key_set,
   return unique_key_indices;
 }
 
-template rmm::device_uvector<size_type> extract_populated_keys<global_set_t>(
-  global_set_t const& key_set,
+template rmm::device_uvector<size_type> extract_populated_keys<global_set_t<false>>(
+  global_set_t<false> const& key_set,
   size_type num_total_keys,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-template rmm::device_uvector<size_type> extract_populated_keys<nullable_global_set_t>(
-  nullable_global_set_t const& key_set,
+template rmm::device_uvector<size_type> extract_populated_keys<global_set_t<true>>(
+  global_set_t<true> const& key_set,
+  size_type num_total_keys,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
+template rmm::device_uvector<size_type> extract_populated_keys<nullable_global_set_t<false>>(
+  nullable_global_set_t<false> const& key_set,
+  size_type num_total_keys,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
+template rmm::device_uvector<size_type> extract_populated_keys<nullable_global_set_t<true>>(
+  nullable_global_set_t<true> const& key_set,
   size_type num_total_keys,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);

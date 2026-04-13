@@ -89,7 +89,7 @@ __device__ void find_global_mapping(cooperative_groups::thread_block const& bloc
  * `global_set` or setting `global_mapping_indices`. Else, we insert the unique keys found to the
  * global hash set, and save the row index of the global sparse table in `global_mapping_indices`.
  */
-template <class SetRef>
+template <class SetRef, bool has_nested>
 CUDF_KERNEL void mapping_indices_kernel(size_type num_input_rows,
                                         SetRef global_set,
                                         bitmask_type const* row_bitmask,
@@ -106,7 +106,7 @@ CUDF_KERNEL void mapping_indices_kernel(size_type num_input_rows,
   auto raw_set = cuco::static_set_ref{
     cuco::empty_key<size_type>{cudf::detail::CUDF_SIZE_TYPE_SENTINEL},
     global_set.key_eq(),
-    probing_scheme_t{global_set.hash_function()},
+    probing_scheme_t<has_nested>{global_set.hash_function()},
     cuco::thread_scope_block,
     cuco::bucket_storage_ref<size_type, GROUPBY_BUCKET_SIZE, decltype(valid_extent)>{valid_extent,
                                                                                      slots}};
@@ -151,16 +151,16 @@ CUDF_KERNEL void mapping_indices_kernel(size_type num_input_rows,
   if (block.thread_rank() == 0) { block_cardinality[block.group_index().x] = cardinality; }
 }
 
-template <class SetRef>
+template <class SetRef, bool has_nested>
 int32_t max_active_blocks_mapping_kernel()
 {
   int32_t max_active_blocks{-1};
   CUDF_CUDA_TRY(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-    &max_active_blocks, mapping_indices_kernel<SetRef>, GROUPBY_BLOCK_SIZE, 0));
+    &max_active_blocks, mapping_indices_kernel<SetRef, has_nested>, GROUPBY_BLOCK_SIZE, 0));
   return max_active_blocks;
 }
 
-template <class SetRef>
+template <class SetRef, bool has_nested>
 void compute_mapping_indices(size_type grid_size,
                              size_type num_rows,
                              SetRef global_set,
@@ -171,7 +171,7 @@ void compute_mapping_indices(size_type grid_size,
                              cuda::std::atomic_flag* needs_global_memory_fallback,
                              rmm::cuda_stream_view stream)
 {
-  mapping_indices_kernel<<<grid_size, GROUPBY_BLOCK_SIZE, 0, stream>>>(
+  mapping_indices_kernel<SetRef, has_nested><<<grid_size, GROUPBY_BLOCK_SIZE, 0, stream>>>(
     num_rows,
     global_set,
     row_bitmask,

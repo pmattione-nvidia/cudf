@@ -113,12 +113,15 @@ std::unique_ptr<table> compute_groupby(table_view const& keys,
     return hashes;
   }();
 
+  using row_cache = row_hasher_with_cache_t<Hash>;
+
   auto set =
     cuco::static_set{cuco::extent<int64_t>{static_cast<int64_t>(num_keys)},
                      cudf::detail::CUCO_DESIRED_LOAD_FACTOR,  // 50% load factor
                      cuco::empty_key{cudf::detail::CUDF_SIZE_TYPE_SENTINEL},
                      d_row_equal,
-                     probing_scheme_t{row_hasher_with_cache_t{d_row_hash, cached_hashes.data()}},
+                     probing_scheme_t<row_cache::has_nested>{row_cache{d_row_hash,
+                                                                       cached_hashes.data()}},
                      cuco::thread_scope_device,
                      cuco::storage<GROUPBY_BUCKET_SIZE>{},
                      rmm::mr::polymorphic_allocator<char>{},
@@ -177,22 +180,44 @@ std::unique_ptr<table> compute_groupby(table_view const& keys,
   return gather_keys(key_gather_map);
 }
 
-template std::unique_ptr<table> compute_groupby<row_comparator_t, row_hash_t>(
+// Explicit instantiation definitions: all `Equal` × `row_hash_t<…>` combinations. Dispatch only
+// uses (row_comparator_t, row_hash_t<false>) and (nullable_row_comparator_t, row_hash_t<true>).
+template std::unique_ptr<table> compute_groupby<row_comparator_t, row_hash_t<false>>(
   table_view const& keys,
   host_span<aggregation_request const> requests,
   bool skip_rows_with_nulls,
   row_comparator_t const& d_row_equal,
-  row_hash_t const& d_row_hash,
+  row_hash_t<false> const& d_row_hash,
   cudf::detail::result_cache* cache,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-template std::unique_ptr<table> compute_groupby<nullable_row_comparator_t, row_hash_t>(
+template std::unique_ptr<table> compute_groupby<row_comparator_t, row_hash_t<true>>(
+  table_view const& keys,
+  host_span<aggregation_request const> requests,
+  bool skip_rows_with_nulls,
+  row_comparator_t const& d_row_equal,
+  row_hash_t<true> const& d_row_hash,
+  cudf::detail::result_cache* cache,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
+template std::unique_ptr<table> compute_groupby<nullable_row_comparator_t, row_hash_t<false>>(
   table_view const& keys,
   host_span<aggregation_request const> requests,
   bool skip_rows_with_nulls,
   nullable_row_comparator_t const& d_row_equal,
-  row_hash_t const& d_row_hash,
+  row_hash_t<false> const& d_row_hash,
+  cudf::detail::result_cache* cache,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
+template std::unique_ptr<table> compute_groupby<nullable_row_comparator_t, row_hash_t<true>>(
+  table_view const& keys,
+  host_span<aggregation_request const> requests,
+  bool skip_rows_with_nulls,
+  nullable_row_comparator_t const& d_row_equal,
+  row_hash_t<true> const& d_row_hash,
   cudf::detail::result_cache* cache,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);

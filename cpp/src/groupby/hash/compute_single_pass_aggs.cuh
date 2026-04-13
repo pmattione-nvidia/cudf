@@ -58,8 +58,9 @@ std::pair<rmm::device_uvector<size_type>, bool> compute_single_pass_aggs(
 
   // Grid size used for both index mapping and shared memory aggregation kernels.
   auto const grid_size = [&] {
-    auto const max_blocks_mapping =
-      max_active_blocks_mapping_kernel<typename SetType::ref_type<cuco::insert_and_find_tag>>();
+    auto const max_blocks_mapping = max_active_blocks_mapping_kernel<
+      typename SetType::ref_type<cuco::insert_and_find_tag>,
+      row_hasher_has_nested_for_hash_set_v<SetType>>();
     auto const max_blocks_aggs = max_active_blocks_shmem_aggs_kernel();
     // We launch the same grid size for both kernels, thus we need to take the minimum of the two.
     auto const max_blocks    = std::min(max_blocks_mapping, max_blocks_aggs);
@@ -97,15 +98,17 @@ std::pair<rmm::device_uvector<size_type>, bool> compute_single_pass_aggs(
     needs_global_memory_fallback.data(), 0, sizeof(cuda::std::atomic_flag), stream.value()));
 
   auto set_ref_insert = global_set.ref(cuco::op::insert_and_find);
-  compute_mapping_indices(grid_size,
-                          num_rows,
-                          set_ref_insert,
-                          row_bitmask,
-                          local_mapping_indices.data(),
-                          global_mapping_indices.data(),
-                          block_cardinality.data(),
-                          needs_global_memory_fallback.data(),
-                          stream);
+  compute_mapping_indices<typename SetType::ref_type<cuco::insert_and_find_tag>,
+                          row_hasher_has_nested_for_hash_set_v<SetType>>(
+    grid_size,
+    num_rows,
+    set_ref_insert,
+    row_bitmask,
+    local_mapping_indices.data(),
+    global_mapping_indices.data(),
+    block_cardinality.data(),
+    needs_global_memory_fallback.data(),
+    stream);
 
   auto const needs_fallback = [&] {
     cuda::std::atomic_flag h_needs_fallback;

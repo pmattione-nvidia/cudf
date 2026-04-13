@@ -81,15 +81,17 @@ std::unique_ptr<table> dispatch_groupby(table_view const& keys,
   auto preprocessed_keys = cudf::detail::row::hash::preprocessed_table::create(keys, stream);
   auto const comparator  = cudf::detail::row::equality::self_comparator{preprocessed_keys};
   auto const row_hash    = cudf::detail::row::hash::row_hasher{std::move(preprocessed_keys)};
-  auto const d_row_hash  = row_hash.device_hasher(has_null);
 
   if (cudf::detail::has_nested_columns(keys)) {
     auto const d_row_equal = comparator.equal_to<true>(has_null, null_keys_are_equal);
-    return compute_groupby<nullable_row_comparator_t>(
+    auto const d_row_hash  = row_hash.device_hasher(has_null);
+    return compute_groupby<nullable_row_comparator_t, row_hash_t<true>>(
       keys, requests, skip_rows_with_nulls, d_row_equal, d_row_hash, cache, stream, mr);
   } else {
     auto const d_row_equal = comparator.equal_to<false>(has_null, null_keys_are_equal);
-    return compute_groupby<row_comparator_t>(
+    auto const d_row_hash =
+      row_hash.device_hasher<cudf::hashing::detail::default_hash, false>(has_null);
+    return compute_groupby<row_comparator_t, row_hash_t<false>>(
       keys, requests, skip_rows_with_nulls, d_row_equal, d_row_hash, cache, stream, mr);
   }
 }

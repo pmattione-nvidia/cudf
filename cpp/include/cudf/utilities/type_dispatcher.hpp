@@ -444,7 +444,8 @@ using scalar_device_type_t = typename type_to_scalar_type_impl<T>::ScalarDeviceT
  * lambda must be the same, else there will be a compiler error as you would be
  * trying to return different types from the same function.
  *
- * @tparam id_to_type_impl Maps a `cudf::type_id` its dispatched C++ type
+ * @tparam IdTypeMap Maps a `cudf::type_id` to its dispatched C++ type
+ * @tparam HasNestedTypes If false, `LIST` and `STRUCT` dispatch to failure instead of the functor
  * @tparam Functor The callable object's type
  * @tparam Ts Variadic parameter pack type
  * @param dtype The `cudf::data_type` whose `id()` determines which template
@@ -460,6 +461,7 @@ using scalar_device_type_t = typename type_to_scalar_type_impl<T>::ScalarDeviceT
 #pragma nv_exec_check_disable
 #endif
 template <template <cudf::type_id> typename IdTypeMap = id_to_type_impl,
+          bool HasNestedTypes = true,
           typename Functor,
           typename... Ts>
 CUDF_HOST_DEVICE __forceinline__ constexpr decltype(auto) type_dispatcher(cudf::data_type dtype,
@@ -537,8 +539,16 @@ CUDF_HOST_DEVICE __forceinline__ constexpr decltype(auto) type_dispatcher(cudf::
       return f.template operator()<typename IdTypeMap<type_id::STRING>::type>(
         std::forward<Ts>(args)...);
     case type_id::LIST:
-      return f.template operator()<typename IdTypeMap<type_id::LIST>::type>(
-        std::forward<Ts>(args)...);
+      if constexpr (HasNestedTypes) {
+        return f.template operator()<typename IdTypeMap<type_id::LIST>::type>(
+          std::forward<Ts>(args)...);
+      } else {
+#ifndef __CUDA_ARCH__
+        CUDF_FAIL("Nested type dispatch is disabled for this operation.");
+#else
+        CUDF_UNREACHABLE("Nested type dispatch is disabled for this operation.");
+#endif
+      }
     case type_id::DECIMAL32:
       return f.template operator()<typename IdTypeMap<type_id::DECIMAL32>::type>(
         std::forward<Ts>(args)...);
@@ -549,13 +559,21 @@ CUDF_HOST_DEVICE __forceinline__ constexpr decltype(auto) type_dispatcher(cudf::
       return f.template operator()<typename IdTypeMap<type_id::DECIMAL128>::type>(
         std::forward<Ts>(args)...);
     case type_id::STRUCT:
-      return f.template operator()<typename IdTypeMap<type_id::STRUCT>::type>(
-        std::forward<Ts>(args)...);
+      if constexpr (HasNestedTypes) {
+        return f.template operator()<typename IdTypeMap<type_id::STRUCT>::type>(
+          std::forward<Ts>(args)...);
+      } else {
+#ifndef __CUDA_ARCH__
+        CUDF_FAIL("Nested type dispatch is disabled for this operation.");
+#else
+        CUDF_UNREACHABLE("Nested type dispatch is disabled for this operation.");
+#endif
+      }
     default: {
 #ifndef __CUDA_ARCH__
-      CUDF_FAIL("Invalid type_id.");
+      CUDF_FAIL("Unsupported type.");
 #else
-      CUDF_UNREACHABLE("Invalid type_id.");
+      CUDF_UNREACHABLE("Unsupported type.");
 #endif
     }
   }
