@@ -22,7 +22,7 @@
 
 namespace cudf::groupby::detail::hash {
 template <typename SetType>
-__device__ void find_local_mapping(cooperative_groups::thread_block const& block,
+__device__ __forceinline__ void find_local_mapping(cooperative_groups::thread_block const& block,
                                    size_type idx,
                                    size_type num_input_rows,
                                    SetType shared_set,
