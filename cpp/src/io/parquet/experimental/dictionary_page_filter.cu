@@ -293,8 +293,14 @@ CUDF_KERNEL void query_dictionaries(cudf::device_span<T> decoded_data,
 
   // Evaluate the scalar against all cuco hash sets of this column
   for (auto set_idx = group.thread_rank(); set_idx < total_row_groups; set_idx += group.size()) {
-    // If the set is empty (no dictionary page data), then skip the dictionary page filter
-    if (set_offsets[set_idx + 1] - set_offsets[set_idx] == 0) {
+    // Number of values in this hash set
+    auto const num_set_values = value_offsets[set_idx + 1] - value_offsets[set_idx];
+
+    // Skip the dictionary page filter for a column chunk with no dictionary page. Emptiness must be
+    // read from the value count and not from the number of slots, because cuco rounds every
+    // capacity up to at least one bucket, so an empty dictionary still has slots. Its set was never
+    // built, so probing it would report the literal as absent and prune the row group.
+    if (num_set_values == 0) {
       result[set_idx] = operators[scalar_idx] == ast::ast_operator::EQUAL;
       continue;
     }
@@ -311,8 +317,6 @@ CUDF_KERNEL void query_dictionaries(cudf::device_span<T> decoded_data,
                                              storage_ref};
     auto set_find_ref = hash_set_ref.rebind_operators(cuco::contains);
 
-    // Number of values in this hash set
-    auto const num_set_values = value_offsets[set_idx + 1] - value_offsets[set_idx];
     // Literal value to find in this hash set
     auto const literal_value = scalar.value<T>();
 
