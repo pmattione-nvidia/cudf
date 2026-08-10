@@ -901,6 +901,8 @@ CUDF_KERNEL void __launch_bounds__(DECODE_BLOCK_SIZE)
     results[i][row_group_idx] = false;
   }
 
+  group.sync();
+
   // Decode values from the current dictionary page with the current thread block
   for (auto value_idx = group.thread_rank(); value_idx < page.num_input_values;
        value_idx += group.num_threads()) {
