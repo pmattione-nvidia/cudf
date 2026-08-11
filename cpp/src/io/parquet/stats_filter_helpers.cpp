@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -76,6 +76,9 @@ std::reference_wrapper<ast::expression const> stats_columns_collector::visit(
         op == ast_operator::LESS_EQUAL or op == ast_operator::GREATER or
         op == ast_operator::GREATER_EQUAL) {
       _columns_mask[col_ref->get_column_index()] = true;
+      // None of these can match a null, so their stats expressions consult the nullability column
+      // to rule out a chunk of nothing but nulls, which has no min or max to compare against.
+      _has_is_null_operator = true;
     }
   } else {
     // Visit the operands and ignore any output as we only want to build the column mask
@@ -111,6 +114,20 @@ stats_expression_converter::stats_expression_converter(ast::expression const& ex
   _stats_cols_per_column = has_is_null_operator ? 3 : 2;
   _num_columns           = num_columns;
   expr.accept(*this);
+}
+
+void stats_expression_converter::push_non_null_guard(size_type col_index,
+                                                     ast::expression const& stats_expr)
+{
+  using cudf::ast::ast_operator;
+
+  if (not std::cmp_equal(_stats_cols_per_column, 3)) { return; }
+
+  auto const& all_null =
+    _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 2});
+  _stats_expr.push(ast::operation{ast_operator::NULL_LOGICAL_AND,
+                                  _stats_expr.push(ast::operation{ast_operator::NOT, all_null}),
+                                  stats_expr});
 }
 
 std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
@@ -215,10 +232,13 @@ std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column});
         auto const& vmax =
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 1});
-        _stats_expr.push(ast::operation{
+        auto const& in_range = _stats_expr.push(ast::operation{
           ast::ast_operator::LOGICAL_AND,
           _stats_expr.push(ast::operation{ast_operator::GREATER_EQUAL, vmax, literal}),
           _stats_expr.push(ast::operation{ast_operator::LESS_EQUAL, vmin, literal})});
+        // An all-null chunk has no min or max, so this range test is unknown there and would keep
+        // the chunk. The guard makes it prune instead.
+        push_non_null_guard(col_index, in_range);
         break;
       }
       case ast_operator::NOT_EQUAL: {
@@ -226,24 +246,29 @@ std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column});
         auto const& vmax =
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 1});
-        _stats_expr.push(
+        auto const& outside_range = _stats_expr.push(
           ast::operation{ast_operator::LOGICAL_OR,
                          _stats_expr.push(ast::operation{ast_operator::NOT_EQUAL, vmin, vmax}),
                          _stats_expr.push(ast::operation{ast_operator::NOT_EQUAL, vmax, literal})});
+        // A null does not satisfy `!=` either, and an all-null chunk has no min or max to make this
+        // test decisive, so the guard prunes it.
+        push_non_null_guard(col_index, outside_range);
         break;
       }
       case ast_operator::LESS: [[fallthrough]];
       case ast_operator::LESS_EQUAL: {
         auto const& vmin =
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column});
-        _stats_expr.push(ast::operation{op, vmin, literal});
+        // An all-null chunk has no min, leaving this test unknown, so the guard prunes it.
+        push_non_null_guard(col_index, _stats_expr.push(ast::operation{op, vmin, literal}));
         break;
       }
       case ast_operator::GREATER: [[fallthrough]];
       case ast_operator::GREATER_EQUAL: {
         auto const& vmax =
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 1});
-        _stats_expr.push(ast::operation{op, vmax, literal});
+        // An all-null chunk has no max, leaving this test unknown, so the guard prunes it.
+        push_non_null_guard(col_index, _stats_expr.push(ast::operation{op, vmax, literal}));
         break;
       }
       default: {
