@@ -243,25 +243,33 @@ public class HybridScanReader implements AutoCloseable {
   /**
    * Get the byte ranges in the source file that hold the bloom filter and dictionary page
    * data needed for the next round of row-group pruning.
+   *
+   * <p>A dictionary page range may only bound the page it points at, in which case the caller
+   * decides how much of it to read; see {@link DictionaryPageRange}.
    */
   public SecondaryFilterRanges secondaryFiltersByteRanges(int[] rowGroupIndices) {
     assertNotClosed();
     requireNonNullRowGroups(rowGroupIndices);
     long[] packed = secondaryFiltersByteRanges(cleaner.nativeHandle, rowGroupIndices);
-    // Layout: [numBloomRanges, bloom_o0, bloom_s0, ..., dict_o0, dict_s0, ...]
+    // Layout: [numBloom, numDict, bloom_o0, bloom_s0, ..., dict_o0, dict_s0, dict_extent0, ...]
     int numBloom = (int) packed[0];
-    int totalRanges = (packed.length - 1) / 2;
-    int numDict = totalRanges - numBloom;
+    int numDict = (int) packed[1];
     ByteRange[] bloom = new ByteRange[numBloom];
-    ByteRange[] dict = new ByteRange[numDict];
-    int idx = 1;
+    DictionaryPageRange[] dict = new DictionaryPageRange[numDict];
+    int idx = 2;
     for (int i = 0; i < numBloom; i++) {
       bloom[i] = new ByteRange(packed[idx], packed[idx + 1]);
       idx += 2;
     }
+    DictionaryPageRange.Extent[] extents = DictionaryPageRange.Extent.values();
     for (int i = 0; i < numDict; i++) {
-      dict[i] = new ByteRange(packed[idx], packed[idx + 1]);
-      idx += 2;
+      long extent = packed[idx + 2];
+      if (extent < 0 || extent >= extents.length) {
+        throw new IllegalStateException("Unknown dictionary page extent " + extent);
+      }
+      dict[i] = new DictionaryPageRange(new ByteRange(packed[idx], packed[idx + 1]),
+          extents[(int) extent]);
+      idx += 3;
     }
     return new SecondaryFilterRanges(bloom, dict);
   }
@@ -273,7 +281,43 @@ public class HybridScanReader implements AutoCloseable {
   //       file written from Java contains no bloom filter blocks and the method would
   //       always return the input row groups unchanged.
 
-  /** Filter row groups using column-chunk dictionary pages loaded into device memory. */
+  /**
+   * The length of the dictionary page at the front of each buffer, its page header included, or 0
+   * for a buffer that does not begin with a whole dictionary page.
+   *
+   * <p>What was read of a range that only bounds its dictionary page begins at that page and runs
+   * past it, so it has to be cut down to the page before
+   * {@link #filterRowGroupsWithDictionaryPages} is given it. The page's own header says how long
+   * the page is, and this reads that header off the front of each buffer. A 0 means the chunk
+   * cannot be pruned with what was read, either because a writer claimed dictionary encoding and
+   * wrote no dictionary page, or because the page is longer than what was read; such a chunk is
+   * passed on as an empty buffer.
+   *
+   * <p>The buffers are read on the host, and nothing here touches the GPU.
+   *
+   * @param pageData one buffer per dictionary page range, read from the start of the range
+   * @return the length of the page in each buffer, in the order the buffers were given
+   */
+  public static long[] dictionaryPageLengths(HostMemoryBuffer[] pageData) {
+    if (pageData == null) {
+      throw new IllegalArgumentException("pageData must not be null");
+    }
+    long[] addrs = new long[pageData.length];
+    long[] lens = new long[pageData.length];
+    for (int i = 0; i < pageData.length; i++) {
+      addrs[i] = pageData[i].getAddress();
+      lens[i] = pageData[i].getLength();
+    }
+    return dictionaryPageLengths(addrs, lens);
+  }
+
+  /**
+   * Filter row groups using column-chunk dictionary pages loaded into device memory.
+   *
+   * <p>Each buffer must hold exactly one dictionary page, or nothing at all for a column chunk that
+   * has no dictionary page to prune with. See {@link #dictionaryPageLengths} for cutting down what
+   * was read of a range that only bounds its page.
+   */
   public int[] filterRowGroupsWithDictionaryPages(DeviceMemoryBuffer[] dictionaryPageData,
                                                   int[] rowGroupIndices) {
     assertNotClosed();
@@ -723,6 +767,8 @@ public class HybridScanReader implements AutoCloseable {
   // Filtering
   private static native int[] filterRowGroupsWithStats(long handle, int[] rowGroupIndices);
   private static native long[] secondaryFiltersByteRanges(long handle, int[] rowGroupIndices);
+  private static native long[] dictionaryPageLengths(long[] bufferAddresses,
+                                                    long[] bufferLengths);
   private static native int[] filterRowGroupsWithDictionaryPages(long handle,
                                                                  long[] bufferAddresses,
                                                                  long[] bufferLengths,

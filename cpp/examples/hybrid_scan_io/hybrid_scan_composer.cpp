@@ -136,8 +136,11 @@ std::vector<cudf::size_type> apply_row_group_filters(
       filters.contains(hybrid_scan_filter_type::ROW_GROUPS_WITH_BLOOM_FILTERS)) {
     if (verbose) { std::cout << "READER: Get bloom filter and dictionary page byte ranges...\n"; }
     timer.reset();
-    std::tie(bloom_filter_byte_ranges, dict_page_byte_ranges) =
+    auto dict_page_ranges = std::vector<cudf::io::parquet::experimental::dictionary_page_range>{};
+    std::tie(bloom_filter_byte_ranges, dict_page_ranges) =
       reader.secondary_filters_byte_ranges(current_row_group_indices, options);
+    dict_page_byte_ranges =
+      cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(dict_page_ranges);
     if (verbose) { timer.print_elapsed_millis(); }
   }
 

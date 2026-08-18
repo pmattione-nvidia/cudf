@@ -15,7 +15,9 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
 
+#include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -51,6 +53,63 @@ enum class use_data_page_mask : bool {
   YES = true,  ///< Compute and use a data page mask
   NO  = false  ///< Do not compute or use a data page mask
 };
+
+/**
+ * @brief How closely a dictionary page byte range describes the page it points at
+ *
+ * An `upper_bound_if_present` range begins at the dictionary page if the column chunk has one, and
+ * ends no earlier than that page does. A writer is allowed to leave out where the page ends, and to
+ * say that a chunk is dictionary encoded when it holds no dictionary page at all, so a range of
+ * this kind is a bound on a page that may not be there.
+ */
+enum class dictionary_page_extent : bool {
+  exact,                  ///< The range is exactly the dictionary page
+  upper_bound_if_present  ///< The range bounds a dictionary page that may not be there
+};
+
+/**
+ * @brief Byte range of a column chunk's dictionary page, and how closely it describes that page
+ *
+ * A caller is free to read less than an `upper_bound_if_present` range, which is how it caps what
+ * it spends looking for a page that may not be there. The reader still wants a span holding exactly
+ * one dictionary page, so a caller that reads such a range measures the page in it with
+ * `dictionary_page_length`, and passes an empty span for a chunk whose page is not there or does
+ * not fit in what was read.
+ */
+struct dictionary_page_range {
+  byte_range_info byte_range;     ///< Byte range to read from the file
+  dictionary_page_extent extent;  ///< How closely `byte_range` describes the dictionary page
+};
+
+/**
+ * @brief Byte ranges to read for the specified dictionary page ranges
+ *
+ * No more than `max_upper_bound_size` bytes are read of a range that only bounds its dictionary
+ * page, which is how a caller caps what it spends looking for a page that may not be there. By
+ * default the whole of every range is read. What is read of such a range still has to be trimmed to
+ * the dictionary page before it is handed to the reader, see `dictionary_page_range`.
+ *
+ * @param dictionary_page_ranges Dictionary page ranges from `secondary_filters_byte_ranges`
+ * @param max_upper_bound_size Most bytes to read of a range that only bounds its dictionary page
+ * @return Byte ranges to read, one per input dictionary page range
+ */
+[[nodiscard]] std::vector<byte_range_info> dictionary_page_byte_ranges_to_read(
+  cudf::host_span<dictionary_page_range const> dictionary_page_ranges,
+  int64_t max_upper_bound_size = std::numeric_limits<int64_t>::max());
+
+/**
+ * @brief Length of the dictionary page at the front of the specified bytes, header included
+ *
+ * What was read of a range that only bounds its dictionary page begins at that page and runs past
+ * it. The page's own header says how long the page is, so this reads that header to find where the
+ * page ends, which is what turns such a range into the one page the reader takes.
+ *
+ * @param page_bytes Bytes read for a dictionary page range, from the start of the range
+ * @return Length of the dictionary page, or `std::nullopt` if these bytes do not begin with a whole
+ *         dictionary page, which is the case for a column chunk that has none to prune with
+ */
+[[nodiscard]] std::optional<int64_t> dictionary_page_length(
+  cudf::host_span<uint8_t const> page_bytes);
 
 /**
  * @brief The experimental parquet reader class to optimally read parquet files subject to
@@ -147,17 +206,28 @@ enum class use_data_page_mask : bool {
  * current_row_group_indices = stats_filtered_row_group_indices;
  *
  * // Get byte ranges of bloom filters and dictionaries for the current row groups
- * auto [bloom_filter_byte_ranges, dict_page_byte_ranges] =
+ * auto [bloom_filter_byte_ranges, dict_page_ranges] =
  *   reader->secondary_filters_byte_ranges(current_row_group_indices, options);
  *
  * // Optional: Prune row groups if we have valid dictionary pages
  * auto dict_filtered_row_group_indices = std::vector<size_type>{};
  *
- * if (dict_page_byte_ranges.size()) {
+ * if (dict_page_ranges.size()) {
+ *   // Decide how much of each range to read. A range that only bounds its dictionary page can be
+ *   // much larger than the page it bounds, so read no more of it than a dictionary page is worth.
+ *   auto const dict_page_byte_ranges =
+ *     dictionary_page_byte_ranges_to_read(dict_page_ranges, max_dict_page_size);
+ *
  *   // Fetch dictionary page byte ranges into device buffers and create spans
  *   auto [dict_page_buffers, dict_page_data, dict_page_tasks] =
  *     parquet::fetch_byte_ranges_to_device_async(datasource, dict_page_byte_ranges, stream, mr);
  *   dict_page_tasks.get();
+ *
+ *   // The spans above are what the reader takes as long as every range was exactly a page. What
+ *   // was read of a range that only bounds its page runs past that page instead, and may hold no
+ *   // page at all, so such a range has to be fetched into host memory, measured with
+ *   // `dictionary_page_length`, and copied to the device cut down to its page. A column chunk
+ *   // left with an empty span is not pruned with.
  *
  *   // Prune row groups using dictionaries
  *   dict_filtered_row_group_indices = reader->filter_row_groups_with_dictionary_pages(
@@ -395,15 +465,19 @@ class hybrid_scan_reader {
    *
    * @param row_group_indices Input row groups indices
    * @param options Parquet reader options
-   * @return Pair of vectors of byte ranges of column chunk with bloom filters and dictionary
-   *         pages subject to filter predicate
+   * @return Pair of a vector of byte ranges of column chunks with bloom filters and a vector of
+   *         dictionary page ranges, subject to filter predicate
    */
-  [[nodiscard]] std::pair<std::vector<byte_range_info>, std::vector<byte_range_info>>
+  [[nodiscard]] std::pair<std::vector<byte_range_info>, std::vector<dictionary_page_range>>
   secondary_filters_byte_ranges(std::span<size_type const> row_group_indices,
                                 parquet_reader_options const& options) const;
 
   /**
    * @brief Filter the row groups using column chunk dictionary pages
+   *
+   * Each span must hold exactly one dictionary page, or nothing at all for a column chunk that has
+   * no dictionary page to prune with. See `dictionary_page_range` for trimming a range that only
+   * bounds its page.
    *
    * @param dictionary_page_data Device spans of dictionary page data of column chunks with an
    * (in)equality predicate, in the same order as the byte ranges returned by

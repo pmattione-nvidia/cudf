@@ -80,14 +80,16 @@ auto apply_hybrid_scan_filters(cudf::io::datasource& datasource,
   current_row_group_indices = stats_filtered_row_group_indices;
 
   // Get bloom filter and dictionary page byte ranges from the reader
-  auto [bloom_filter_byte_ranges, dict_page_byte_ranges] =
+  auto [bloom_filter_byte_ranges, dict_page_ranges] =
     reader.secondary_filters_byte_ranges(current_row_group_indices, options);
 
   // If we have dictionary page byte ranges, filter row groups with dictionary pages
   std::vector<cudf::size_type> dictionary_page_filtered_row_group_indices;
   dictionary_page_filtered_row_group_indices.reserve(current_row_group_indices.size());
-  if (dict_page_byte_ranges.size()) {
+  if (dict_page_ranges.size()) {
     // Fetch dictionary page buffers from the input file buffer
+    auto const dict_page_byte_ranges =
+      cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(dict_page_ranges);
     auto [dict_page_buffers, dict_page_data, dict_read_tasks] =
       cudf::io::parquet::fetch_byte_ranges_to_device_async(
         datasource, dict_page_byte_ranges, stream, mr);

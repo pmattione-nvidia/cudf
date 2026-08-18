@@ -77,7 +77,7 @@ std::vector<std::vector<size_type>> hybrid_scan_multifile::filter_row_groups_wit
   return _impl->filter_row_groups_with_stats(row_group_indices, options, stream);
 }
 
-std::pair<std::vector<text::byte_range_info>, std::vector<text::byte_range_info>>
+std::pair<std::vector<text::byte_range_info>, std::vector<dictionary_page_range>>
 hybrid_scan_multifile::secondary_filters_byte_ranges(
   cudf::host_span<std::vector<size_type> const> row_group_indices,
   parquet_reader_options const& options) const
@@ -295,7 +295,7 @@ std::vector<std::vector<std::vector<size_type>>> hybrid_scan_multifile::construc
   return source_passes;
 }
 
-std::pair<std::vector<text::byte_range_info>, std::vector<size_type>>
+std::pair<std::vector<dictionary_page_range>, std::vector<size_type>>
 hybrid_scan_multifile::dictionary_pages_byte_ranges(
   cudf::host_span<std::vector<size_type> const> row_group_indices,
   parquet_reader_options const& options) const
