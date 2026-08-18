@@ -130,7 +130,7 @@ std::vector<std::reference_wrapper<ast::expression const>> stats_columns_collect
 stats_expression_converter::stats_expression_converter(ast::expression const& expr,
                                                        size_type num_columns,
                                                        bool has_is_null_operator,
-                                                       rmm::cuda_stream_view stream)
+                                                       cuda::stream_ref stream)
   : _always_true_scalar{std::make_unique<cudf::numeric_scalar<bool>>(true, true, stream)},
     _always_true{std::make_unique<ast::literal>(*_always_true_scalar)}
 {
