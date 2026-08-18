@@ -19,8 +19,7 @@
 namespace cudf::io::parquet::experimental {
 
 std::vector<text::byte_range_info> dictionary_page_byte_ranges_to_read(
-  cudf::host_span<dictionary_page_range const> dictionary_page_ranges,
-  int64_t max_upper_bound_size)
+  cudf::host_span<dictionary_page_range const> dictionary_page_ranges, int64_t max_upper_bound_size)
 {
   CUDF_EXPECTS(max_upper_bound_size >= 0, "Maximum bytes to read must not be negative");
 
