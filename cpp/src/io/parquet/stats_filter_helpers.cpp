@@ -14,6 +14,29 @@
 
 namespace cudf::io::parquet::detail {
 
+namespace {
+
+/**
+ * @brief Maps a logical connective to its null-aware equivalent, returning any other operator as is
+ *
+ * A null in a statistics column says the writer did not record the statistic, never that the data
+ * is null, so the statistics expression is a three-valued predicate in which null means "unknown,
+ * keep this chunk". Three-valued logic is what propagates that: `false AND unknown` is false,
+ * because a chunk holding no row that can satisfy one conjunct cannot satisfy the conjunction
+ * whatever the other side turns out to be. The plain connectives instead return null whenever
+ * either side is null, which lets one absent statistic switch off pruning for the whole expression.
+ */
+[[nodiscard]] ast::ast_operator null_aware_operator(ast::ast_operator op)
+{
+  switch (op) {
+    case ast::ast_operator::LOGICAL_AND: return ast::ast_operator::NULL_LOGICAL_AND;
+    case ast::ast_operator::LOGICAL_OR: return ast::ast_operator::NULL_LOGICAL_OR;
+    default: return op;
+  }
+}
+
+}  // namespace
+
 stats_columns_collector::stats_columns_collector(ast::expression const& expr,
                                                  cudf::size_type num_columns)
   : _num_columns(num_columns)
@@ -125,9 +148,17 @@ void stats_expression_converter::push_non_null_guard(size_type col_index,
 
   auto const& all_null =
     _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 2});
-  _stats_expr.push(ast::operation{ast_operator::NULL_LOGICAL_AND,
-                                  _stats_expr.push(ast::operation{ast_operator::NOT, all_null}),
-                                  stats_expr});
+  // Answering "not entirely null" takes all three of the column's states, so a plain NOT will not
+  // do: its null state says the chunk holds both nulls and values, or that the writer recorded no
+  // null count, and both of those answer this question true. NOT alone answers it null and hands an
+  // unknown to a comparison that is in fact decisive.
+  auto const& not_all_null = _stats_expr.push(
+    ast::operation{ast_operator::NULL_LOGICAL_OR,
+                   _stats_expr.push(ast::operation{ast_operator::IS_NULL, all_null}),
+                   _stats_expr.push(ast::operation{ast_operator::NOT, all_null})});
+  // Null-aware so that the false this side pushes for an all-null chunk prunes it even though the
+  // min and max it lacks leave `stats_expr` unknown.
+  _stats_expr.push(ast::operation{ast_operator::NULL_LOGICAL_AND, not_all_null, stats_expr});
 }
 
 std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
@@ -232,8 +263,10 @@ std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column});
         auto const& vmax =
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 1});
+        // The two halves are separately optional in the statistics, so they are combined null-aware
+        // to keep whichever one is present decisive.
         auto const& in_range = _stats_expr.push(ast::operation{
-          ast::ast_operator::LOGICAL_AND,
+          ast::ast_operator::NULL_LOGICAL_AND,
           _stats_expr.push(ast::operation{ast_operator::GREATER_EQUAL, vmax, literal}),
           _stats_expr.push(ast::operation{ast_operator::LESS_EQUAL, vmin, literal})});
         // An all-null chunk has no min or max, so this range test is unknown there and would keep
@@ -246,8 +279,10 @@ std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column});
         auto const& vmax =
           _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 1});
+        // Null-aware for the same reason as the range test above: either half can be the one the
+        // statistics carry.
         auto const& outside_range = _stats_expr.push(
-          ast::operation{ast_operator::LOGICAL_OR,
+          ast::operation{ast_operator::NULL_LOGICAL_OR,
                          _stats_expr.push(ast::operation{ast_operator::NOT_EQUAL, vmin, vmax}),
                          _stats_expr.push(ast::operation{ast_operator::NOT_EQUAL, vmax, literal})});
         // A null does not satisfy `!=` either, and an all-null chunk has no min or max to make this
@@ -279,7 +314,8 @@ std::reference_wrapper<ast::expression const> stats_expression_converter::visit(
   }  // Visit operands and push expression for `expr op expr` form
   else if (lhs_kind == operand_kind::EXPRESSION and rhs_kind == operand_kind::EXPRESSION) {
     auto new_operands = visit_operands(expr.get_operands());
-    _stats_expr.push(ast::operation{op, new_operands.front(), new_operands.back()});
+    _stats_expr.push(
+      ast::operation{null_aware_operator(op), new_operands.front(), new_operands.back()});
   }  // Push _always_true for `col op col`, `expr op col`, `expr op lit` forms
   else {
     _stats_expr.push(ast::operation{ast_operator::IDENTITY, *_always_true});

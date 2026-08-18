@@ -1840,8 +1840,8 @@ TEST_P(DictionaryFilterGapTest, FilterRowGroupsWithMissingDictPages)
     auto const dict_page_byte_ranges =
       reader->secondary_filters_byte_ranges(row_group_indices, options).second;
     ASSERT_EQ(dict_page_byte_ranges.size(), 2);
-    EXPECT_GT(dict_page_byte_ranges[0].size(), 0);
-    EXPECT_EQ(dict_page_byte_ranges[1].size(), 0);
+    EXPECT_GT(dict_page_byte_ranges[0].byte_range.size(), 0);
+    EXPECT_EQ(dict_page_byte_ranges[1].byte_range.size(), 0);
   }
 
   // Filtering - col0 == "plain_value_5": row group 0 is pruned by its dictionary, row group 1

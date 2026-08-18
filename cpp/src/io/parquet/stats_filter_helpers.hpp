@@ -391,14 +391,15 @@ class stats_expression_converter : public stats_columns_collector {
 
  private:
   /**
-   * @brief Push `NOT(all_null) AND stats_expr` for a column, so that a chunk holding nothing but
+   * @brief Push `not_all_null AND stats_expr` for a column, so that a chunk holding nothing but
    * nulls fails a predicate that needs a non-null value to match
    *
    * A writer has no non-null value to compute min and max from for such a chunk, so it omits them
    * and every min/max comparison evaluates to null, which keeps the chunk. The nullability
    * statistic is decisive where min and max are absent: despite being built as `is_null`, it is
-   * true only when *every* value in the chunk is null, false when none are, and null when only
-   * some are. The conjunction is null-aware so that an unknown side does not mask a decisive one.
+   * true only when *every* value in the chunk is null, false when none are, and null when only some
+   * are or when the writer recorded no null count. Reading three states out of that column takes
+   * more than a `NOT`, since the null state answers "not entirely null" with a definite yes.
    *
    * Does nothing when the nullability column was not built, leaving `stats_expr` as the result.
    *
