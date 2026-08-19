@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <iterator>
 #include <optional>
+#include <utility>
 
 namespace cudf::io::parquet::experimental {
 
@@ -59,7 +60,7 @@ std::optional<int64_t> dictionary_page_length(cudf::host_span<uint8_t const> pag
   // A header cut off by the end of what was read stops parsing without complaint, and a page longer
   // than what was read cannot be pruned with either way.
   auto const page_length = static_cast<int64_t>(reader.bytecount()) + header.compressed_page_size;
-  if (page_length > static_cast<int64_t>(page_bytes.size())) { return std::nullopt; }
+  if (std::cmp_greater(page_length, page_bytes.size())) { return std::nullopt; }
 
   return page_length;
 }
