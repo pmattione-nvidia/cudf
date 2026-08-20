@@ -245,9 +245,13 @@ auto filter_row_groups_with_dictionaries_impl(InputType& inputs,
 
   if constexpr (std::is_same_v<ReaderType,
                                cudf::io::parquet::experimental::hybrid_scan_multifile>) {
-    auto const dict_pages = reader.dictionary_pages_byte_ranges(row_group_indices, options);
-    CUDF_EXPECTS(dict_pages.first.size() > 0, "No dictionary page byte ranges found");
+    auto const [dict_page_ranges, dict_page_source_map] =
+      reader.dictionary_pages_byte_ranges(row_group_indices, options);
+    CUDF_EXPECTS(dict_page_ranges.size() > 0, "No dictionary page byte ranges found");
 
+    auto const dict_pages = std::pair{
+      cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(dict_page_ranges),
+      dict_page_source_map};
     auto const dict_page_ranges_per_source =
       group_byte_ranges_by_source(dict_pages, inputs.datasources.size());
     [[maybe_unused]] auto [dict_page_buffers, dict_page_data_per_source, task] =
@@ -265,7 +269,8 @@ auto filter_row_groups_with_dictionaries_impl(InputType& inputs,
       dict_page_data, row_group_indices, options, stream);
   } else {
     auto const dict_page_byte_ranges =
-      reader.secondary_filters_byte_ranges(row_group_indices, options).second;
+      cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(
+        reader.secondary_filters_byte_ranges(row_group_indices, options).second);
     CUDF_EXPECTS(dict_page_byte_ranges.size() > 0, "No dictionary page byte ranges found");
 
     [[maybe_unused]] auto [dict_page_buffers, dict_page_data, dict_page_tasks] =

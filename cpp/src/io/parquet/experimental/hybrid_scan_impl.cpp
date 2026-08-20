@@ -277,7 +277,7 @@ std::vector<std::vector<size_type>> hybrid_scan_reader_impl::filter_row_groups_w
                                                           stream);
 }
 
-std::pair<std::vector<byte_range_info>, std::vector<byte_range_info>>
+std::pair<std::vector<byte_range_info>, std::vector<dictionary_page_range>>
 hybrid_scan_reader_impl::secondary_filters_byte_ranges(
   std::span<std::vector<size_type> const> row_group_indices, parquet_reader_options const& options)
 {
@@ -292,7 +292,7 @@ hybrid_scan_reader_impl::secondary_filters_byte_ranges(
                                   _output_column_schemas,
                                   expr_conv.get_converted_expr().value())
       .first;
-  auto const dictionary_page_bytes =
+  auto const dictionary_page_ranges =
     _extended_metadata
       ->dictionary_pages_byte_ranges(row_group_indices,
                                      output_dtypes,
@@ -300,10 +300,10 @@ hybrid_scan_reader_impl::secondary_filters_byte_ranges(
                                      expr_conv.get_converted_expr().value())
       .first;
 
-  return {bloom_filter_bytes, dictionary_page_bytes};
+  return {bloom_filter_bytes, dictionary_page_ranges};
 }
 
-std::pair<std::vector<byte_range_info>, std::vector<cudf::size_type>>
+std::pair<std::vector<dictionary_page_range>, std::vector<cudf::size_type>>
 hybrid_scan_reader_impl::dictionary_pages_byte_ranges(
   cudf::host_span<std::vector<size_type> const> row_group_indices,
   parquet_reader_options const& options)
