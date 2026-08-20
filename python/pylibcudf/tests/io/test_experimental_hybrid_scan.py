@@ -18,8 +18,11 @@ from pylibcudf.expressions import (
     Operation,
 )
 from pylibcudf.io.experimental import (
+    DictionaryPageExtent,
+    DictionaryPageRange,
     HybridScanReader,
     UseDataPageMask,
+    dictionary_page_byte_ranges_to_read,
 )
 
 
@@ -246,9 +249,21 @@ def test_hybrid_scan_secondary_filters_byte_ranges(
         )
     )
 
-    # These should be lists of ByteRangeInfo
+    # These should be lists of ByteRangeInfo and DictionaryPageRange
     assert isinstance(bloom_ranges, list)
     assert isinstance(dict_ranges, list)
+    assert all(isinstance(r, DictionaryPageRange) for r in dict_ranges)
+
+    # A range that only bounds its page is read no further than the cap, and
+    # one that is exactly its page is read whole whatever the cap says.
+    to_read = dictionary_page_byte_ranges_to_read(dict_ranges, 64)
+    assert len(to_read) == len(dict_ranges)
+    for page_range, byte_range in zip(dict_ranges, to_read, strict=True):
+        assert byte_range.offset == page_range.byte_range.offset
+        if page_range.extent == DictionaryPageExtent.upper_bound_if_present:
+            assert byte_range.size == min(page_range.byte_range.size, 64)
+        else:
+            assert byte_range.size == page_range.byte_range.size
 
 
 def test_hybrid_scan_column_chunk_byte_ranges(
