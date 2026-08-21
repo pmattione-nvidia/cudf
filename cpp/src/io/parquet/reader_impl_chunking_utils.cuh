@@ -665,10 +665,14 @@ struct get_page_span {
       start_page++;
     }
 
+    // upper_bound (not lower_bound): pages containing no new rows hold only values continuing a row
+    // that began in an earlier page, so they share their predecessor's end row index. They must be
+    // included alongside that predecessor, since at the end of a pass there is no later subpass to
+    // pick them up and their values would be lost.
     auto end_page =
       cuda::std::distance(
         column_page_start,
-        thrust::lower_bound(thrust::seq, column_page_start, column_page_end, end_row)) +
+        thrust::upper_bound(thrust::seq, column_page_start, column_page_end, end_row)) +
       first_page_index;
     if (end_page < (first_page_index + num_pages)) { end_page++; }
 
