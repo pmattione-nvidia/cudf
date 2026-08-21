@@ -5,17 +5,16 @@
 
 #include "expression_transform_helpers.hpp"
 #include "reader_impl_helpers.hpp"
+#include "row_group_stats_helpers.hpp"
 #include "stats_filter_helpers.hpp"
-#include "timestamp_utils.cuh"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/iterator.cuh>
 #include <cudf/detail/transform.hpp>
-#include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/table/table.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
-#include <cudf/utilities/traits.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <cuda/iterator>
@@ -292,10 +291,9 @@ aggregate_reader_metadata::filter_row_groups(
       : total_row_groups;
 
   // Span of row groups to apply bloom filtering on.
-  auto const bloom_filter_input_row_groups =
-    stats_filtered_row_groups.has_value()
-      ? host_span<std::vector<size_type> const>(stats_filtered_row_groups.value())
-      : input_row_group_indices;
+  auto const bloom_filter_input_row_groups = stats_filtered_row_groups.has_value()
+                                               ? stats_filtered_row_groups.value()
+                                               : input_row_group_indices;
 
   // Collect equality literals for each input table column for bloom filtering
   auto const equality_literals =
