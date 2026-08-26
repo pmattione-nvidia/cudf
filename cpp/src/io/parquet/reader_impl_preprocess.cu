@@ -810,12 +810,11 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
     page_input,
     chunk_row_output_iter{pass.pages.device_ptr()});
 
-  // Only when the row counts started out as estimates: the count forced onto the last page of each
-  // chunk back then was derived from those estimates, and replacing them with decoded counts moves
-  // chunk_row for every page that follows, so the forced count has to be recomputed to match.
-  // Otherwise the last page of the chunk keeps a row count that no longer meets its start row, and
-  // once the two have drifted far enough the page looks like it begins past the end of the pass and
-  // is never read at all. This mirrors the condition that estimated the counts in setup_next_pass.
+  // Decoding a subpass gives real row counts for the pages it read, overwriting the estimates they
+  // held, and the scan above recomputes chunk_row from them. The count forced onto the last page of
+  // each chunk came from those estimates, so it has to be recomputed too, or it drifts until the
+  // page looks like it starts past the end of the pass and is never read at all. This condition is
+  // where setup_next_pass forced it: generate_list_column_row_counts(is_estimate_row_counts::YES).
   if (pass.has_compressed_data and _input_pass_read_limit != 0 and not _has_offset_index) {
     thrust::for_each(rmm::exec_policy_nosync(_stream, cudf::get_current_device_resource_ref()),
                      iter,

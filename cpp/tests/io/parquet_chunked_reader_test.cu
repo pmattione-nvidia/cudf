@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <numeric>
 #include <optional>
 #include <ranges>
 #include <type_traits>
@@ -1394,35 +1395,27 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ProjectedColumnsReducePasses)
   EXPECT_LT(one_col_chunks, all_cols_chunks);
 }
 
-// A row whose list is long enough to span several data pages produces continuation pages that
-// contain no new rows, and those pages share the end row index of the page that started the row.
-// When selecting the pages for a subpass, only the first page with that end row index was picked
-// up, so the trailing continuation pages were dropped. At the end of a pass there is no later
-// subpass to read them, so their values were lost: the two children of a map column ended up with
-// different row counts ("Child columns must have the same number of rows as the Struct column"),
-// while a list<string> column silently produced truncated rows.
-//
-// This only happens when an input (pass) read limit is set, which is what makes the reader choose
-// pages by row range instead of taking every page in the pass.
 TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
 {
+  // Read list and map columns holding rows long enough to span several pages, including at the end
+  // of the pass, under an input limit so that the reader selects pages by row range.
   auto constexpr num_rows   = 1'000;
   auto constexpr small_size = 2;
   auto constexpr giant_size = 20'000;
 
-  // The last row is giant so that its continuation pages sit at the end of the pass. The middle
-  // row covers the case where a later subpass exists.
-  std::vector<cudf::size_type> list_sizes(num_rows, small_size);
-  list_sizes[num_rows / 2] = giant_size;
-  list_sizes[num_rows - 1] = giant_size;
-
-  std::vector<cudf::size_type> offsets(num_rows + 1, 0);
-  for (int i = 0; i < num_rows; ++i) {
-    offsets[i + 1] = offsets[i] + list_sizes[i];
-  }
+  // List size of each row, shifted by one so that a scan turns them into offsets. The last row is
+  // giant so that its continuation pages sit at the end of the pass. The middle row covers the case
+  // where a later subpass exists.
+  std::vector<cudf::size_type> offsets(num_rows + 1, small_size);
+  offsets.front()           = 0;
+  offsets[num_rows / 2 + 1] = giant_size;
+  offsets.back()            = giant_size;
+  std::inclusive_scan(offsets.begin(), offsets.end(), offsets.begin());
   auto const num_children = offsets.back();
 
-  // Distinct strings so the writer uses PLAIN instead of dictionary encoding.
+  // Distinct strings so that the data does not compress away to nothing, which would stop the input
+  // limit from splitting the read into multiple subpasses. Dictionary encoding is disabled in the
+  // writer options below.
   std::vector<std::string> keys(num_children);
   std::vector<std::string> values(num_children);
   for (cudf::size_type i = 0; i < num_children; ++i) {
@@ -1458,7 +1451,9 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
 
   // The input limit path is only taken for compressed data, and the pages have to be small for the
   // giant rows to span them.
-  auto const write = [&](std::string const& filename, cudf::io::compression_type compression) {
+  auto const write = [&](std::string const& filename,
+                         cudf::io::compression_type compression,
+                         cudf::size_type row_group_rows) {
     auto const filepath = temp_env->get_temp_filepath(filename);
     cudf::io::write_parquet(
       cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, expected->view())
@@ -1467,13 +1462,20 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
         .write_v2_headers(false)
         .max_page_size_bytes(4 * 1024)
         .max_page_size_rows(128)
+        .row_group_size_rows(row_group_rows)
         .build());
     return filepath;
   };
 
-  auto const filepaths = std::vector<std::string>{
-    write("list_spanning_pages_snappy.parquet", cudf::io::compression_type::SNAPPY),
-    write("list_spanning_pages_zstd.parquet", cudf::io::compression_type::ZSTD)};
+  // Several row groups as well as one, so that a column's pages span more than a single chunk. Both
+  // giant rows keep their place: the middle one in a group of its own, the last one at the very
+  // end.
+  auto constexpr rows_per_group = 256;
+  auto const filepaths          = std::vector<std::string>{
+    write("spanning_snappy.parquet", cudf::io::compression_type::SNAPPY, num_rows),
+    write("spanning_zstd.parquet", cudf::io::compression_type::ZSTD, num_rows),
+    write("spanning_snappy_groups.parquet", cudf::io::compression_type::SNAPPY, rows_per_group),
+    write("spanning_zstd_groups.parquet", cudf::io::compression_type::ZSTD, rows_per_group)};
 
   for (auto const& filepath : filepaths) {
     for (auto const input_limit : {std::size_t{1},
@@ -1483,6 +1485,9 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
       for (auto const output_limit : {std::size_t{0}, std::size_t{100'000}}) {
         auto const [result, num_chunks] = chunked_read(filepath, output_limit, input_limit);
         CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected->view(), *result);
+        // The small limits have to split the read, or no subpass ever selects pages by row range
+        // and the test passes without exercising anything.
+        if (input_limit <= 64 * 1024) { EXPECT_GT(num_chunks, 1); }
       }
     }
   }

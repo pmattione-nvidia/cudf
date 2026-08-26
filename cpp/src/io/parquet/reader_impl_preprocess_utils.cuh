@@ -278,8 +278,8 @@ struct set_final_row_count {
     size_t const chunk_last_row = chunk.start_row + chunk.num_rows;
     // Row estimates that overshoot can push this page's start past the end of the chunk, in which
     // case it holds no rows at all. Subtracting unguarded would wrap around instead.
-    size_t const rows_left =
-      (chunk_last_row > page_start_row) ? (chunk_last_row - page_start_row) : 0;
+    auto const rows_left = static_cast<int32_t>(
+      (chunk_last_row > page_start_row) ? (chunk_last_row - page_start_row) : 0);
     // Mark `is_num_rows_adjusted` to signal string decoders that the `num_rows` of this page has
     // been adjusted.
     page.is_num_rows_adjusted = page.num_rows != rows_left;

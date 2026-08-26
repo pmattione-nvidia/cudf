@@ -605,6 +605,11 @@ struct page_total_size {
         0, cuda::proclaim_return_type<size_t>([&] __device__(size_type i) {
           return c_info[i].end_row_index;
         }));
+      // The sizes are cumulative, so this stops at the first page carrying that end row and any
+      // page after it sharing the same end row goes uncounted. `get_page_span` does read those
+      // trailing pages, so the sum can fall short by their size. That is acceptable: it is a soft
+      // budget, already deliberately over-estimated above, and such pages hold the tail of a single
+      // row.
       auto const page_index =
         thrust::lower_bound(thrust::seq, iter + start, iter + end, i.end_row_index) - iter;
       sum += c_info[page_index].size_bytes;
@@ -674,14 +679,17 @@ struct get_page_span {
         thrust::lower_bound(thrust::seq, column_page_start, column_page_end, end_row)) +
       first_page_index;
 
-    // Pages following first_page_with_end_row that hold no rows of their own have to be read too:
-    // all of their values continue a row that began in an earlier page. They share that page's end
-    // row index, so a search by row cannot reach them, and at the end of a pass no later subpass is
-    // left to read them, which would lose their values.
+    // Following pages that hold no rows of their own only continue a row that began earlier, so
+    // they share the same end row index and a search by row cannot reach them. Read them here, as
+    // at the end of a pass no later subpass is left to do it and their values would be lost.
     auto const column_end_page = first_page_index + num_pages;
     auto last_page_to_read     = first_page_with_end_row;
-    while ((last_page_to_read + 1) < column_end_page and
-           pages[static_cast<size_t>(last_page_to_read + 1)].num_rows == 0) {
+    while ((last_page_to_read + 1) < column_end_page) {
+      auto const& page      = pages[static_cast<size_t>(last_page_to_read)];
+      auto const& next_page = pages[static_cast<size_t>(last_page_to_read + 1)];
+      // Stop at the chunk boundary. It is also a row boundary, so the next chunk continues nothing,
+      // and it leads with a dictionary page, which holds no rows either.
+      if (next_page.num_rows != 0 or next_page.chunk_idx != page.chunk_idx) { break; }
       last_page_to_read++;
     }
 
