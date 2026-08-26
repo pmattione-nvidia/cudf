@@ -4,6 +4,7 @@
 from pylibcudf.io.experimental.hybrid_scan import (
     DictionaryPageExtent,
     DictionaryPageRange,
+    HybridScanMetadata,
     HybridScanReader,
     UseDataPageMask,
     dictionary_page_byte_ranges_to_read,
@@ -15,6 +16,7 @@ __all__ = [
     "DictionaryPageExtent",
     "DictionaryPageRange",
     "FileMetaData",  # backwards compatibility
+    "HybridScanMetadata",
     "HybridScanReader",
     "UseDataPageMask",
     "dictionary_page_byte_ranges_to_read",

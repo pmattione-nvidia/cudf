@@ -15,6 +15,7 @@ from pylibcudf.io.text cimport ByteRangeInfo
 from pylibcudf.io.types cimport TableWithMetadata
 from pylibcudf.libcudf.io.hybrid_scan cimport (
     dictionary_page_extent as cpp_dictionary_page_extent,
+    hybrid_scan_metadata as cpp_hybrid_scan_metadata,
     hybrid_scan_reader as cpp_hybrid_scan_reader,
     use_data_page_mask,
 )
@@ -30,7 +31,13 @@ cdef class DictionaryPageRange:
     cdef readonly cpp_dictionary_page_extent extent
 
 
+cdef class HybridScanMetadata:
+    cdef unique_ptr[cpp_hybrid_scan_metadata] c_obj
+
+
 cdef class HybridScanReader:
     cdef unique_ptr[cpp_hybrid_scan_reader] c_obj
     cdef Stream _stream
     cdef DeviceMemoryResource mr
+    cdef object _filter_chunk_data
+    cdef object _payload_chunk_data
