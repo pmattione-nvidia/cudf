@@ -120,7 +120,7 @@ namespace {
  * @param column Column chunk metadata with a valid offset index
  * @return Dictionary page offset and size, or `std::nullopt` when no dictionary page is present
  */
-[[nodiscard]] std::optional<std::pair<int64_t, int64_t>> dictionary_page_range(
+[[nodiscard]] std::optional<std::pair<int64_t, int64_t>> find_dictionary_page_range(
   ColumnChunk const& column)
 {
   auto const& page_locations = column.offset_index->page_locations;
@@ -695,7 +695,7 @@ hybrid_scan_reader_impl::payload_pages_byte_ranges(
         };
 
         // Add dictionary page range if any of the data pages are also retained
-        if (auto const dict_page_range = dictionary_page_range(column_chunk);
+        if (auto const dict_page_range = find_dictionary_page_range(column_chunk);
             dict_page_range.has_value()) {
           add_page_range(any_data_page_retained, dict_page_range->first, dict_page_range->second);
         }
