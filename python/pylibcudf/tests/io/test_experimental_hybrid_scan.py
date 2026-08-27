@@ -886,7 +886,9 @@ def test_hybrid_scan_filter_row_groups_with_dictionary_pages_negation(
         # synchronize_stream() below runs.
         # See https://github.com/rapidsai/rmm/issues/2521
         dict_page_bytes = [
-            simple_parquet_bytes[r.offset : r.offset + r.size]
+            simple_parquet_bytes[
+                r.byte_range.offset : r.byte_range.offset + r.byte_range.size
+            ]
             for r in dictionary_ranges
         ]
         dictionary_data = [
