@@ -332,23 +332,18 @@ class stats_columns_collector : public ast::detail::expression_transformer {
   std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override;
 
   /**
-   * @brief Return a boolean vector indicating input columns that can participate in stats based
-   * filtering, and whether the stats table needs a per-column nullability column
+   * @brief Return a boolean vector indicating which input columns can participate in stats based
+   * filtering
    *
-   * The nullability column is needed by an `IS_NULL` operator, which is answered from it alone, and
-   * by any comparison against a literal, which uses it to rule out a chunk of nothing but nulls.
-   *
-   * @return Boolean vector indicating input columns that can participate in stats based filtering,
-   * and whether the nullability column is needed
+   * @return Boolean vector indicating input columns that can participate in stats based filtering
    */
-  std::pair<thrust::host_vector<bool>, bool> get_stats_columns_mask() &&;
+  thrust::host_vector<bool> get_stats_columns_mask() &&;
 
  protected:
   size_type _num_columns;
 
  private:
   thrust::host_vector<bool> _columns_mask;
-  bool _has_is_null_operator = false;
 };
 
 /**
@@ -357,13 +352,12 @@ class stats_columns_collector : public ast::detail::expression_transformer {
  * This is used in row group filtering based on predicate.
  * statistics min value of a column is referenced by column_index*3
  * statistics max value of a column is referenced by column_index*3+1
- * statistics is_null value of a column is referenced by column_index*3+2
+ * statistics all_nulls value of a column is referenced by column_index*3+2
  */
 class stats_expression_converter : public stats_columns_collector {
  public:
   stats_expression_converter(ast::expression const& expr,
                              size_type num_columns,
-                             bool has_is_null_operator,
                              cuda::stream_ref stream);
 
   // Bring all overrides of `visit` from stats_columns_collector into scope
@@ -389,16 +383,8 @@ class stats_expression_converter : public stats_columns_collector {
  private:
   /**
    * @brief Push `not_all_null AND stats_expr` for a column, so that a chunk holding nothing but
-   * nulls fails a predicate that needs a non-null value to match
-   *
-   * A writer has no non-null value to compute min and max from for such a chunk, so it omits them
-   * and every min/max comparison evaluates to null, which keeps the chunk. The nullability
-   * statistic is decisive where min and max are absent: despite being built as `is_null`, it is
-   * true only when *every* value in the chunk is null, false when none are, and null when only some
-   * are or when the writer recorded no null count. Reading three states out of that column takes
-   * more than a `NOT`, since the null state answers "not entirely null" with a definite yes.
-   *
-   * Does nothing when the nullability column was not built, leaving `stats_expr` as the result.
+   * nulls is pruned by a predicate needing a non-null value to match, rather than kept because its
+   * absent min and max leave the comparison null
    *
    * @param col_index Index of the column in the input table
    * @param stats_expr Statistics expression to guard, already pushed onto the tree

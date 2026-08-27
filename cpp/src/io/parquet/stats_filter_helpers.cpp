@@ -19,12 +19,10 @@ namespace {
 /**
  * @brief Maps a logical connective to its null-aware equivalent, returning any other operator as is
  *
- * A null in a statistics column says the writer did not record the statistic, never that the data
- * is null, so the statistics expression is a three-valued predicate in which null means "unknown,
- * keep this chunk". Three-valued logic is what propagates that: `false AND unknown` is false,
- * because a chunk holding no row that can satisfy one conjunct cannot satisfy the conjunction
- * whatever the other side turns out to be. The plain connectives instead return null whenever
- * either side is null, which lets one absent statistic switch off pruning for the whole expression.
+ * A null in a statistics column means the writer did not record the statistic, so it reads as
+ * "unknown, keep this chunk". The null-aware connectives keep a decisive verdict decisive
+ * (`false AND unknown` is false); the plain ones return null if either side is null, letting one
+ * absent statistic switch off pruning for the whole expression.
  */
 [[nodiscard]] ast::ast_operator null_aware_operator(ast::ast_operator op)
 {
@@ -80,10 +78,7 @@ std::reference_wrapper<ast::expression const> stats_columns_collector::visit(
 
     if (kind == operand_kind::COLUMN_REF) {
       col_ref->accept(*this);
-      if (input_op == ast_operator::IS_NULL) {
-        _columns_mask[col_ref->get_column_index()] = true;
-        _has_is_null_operator                      = true;
-      }
+      if (input_op == ast_operator::IS_NULL) { _columns_mask[col_ref->get_column_index()] = true; }
     } else {
       std::ignore = visit_operands(expr.get_operands());
     }
@@ -99,9 +94,6 @@ std::reference_wrapper<ast::expression const> stats_columns_collector::visit(
         op == ast_operator::LESS_EQUAL or op == ast_operator::GREATER or
         op == ast_operator::GREATER_EQUAL) {
       _columns_mask[col_ref->get_column_index()] = true;
-      // None of these can match a null, so their stats expressions consult the nullability column
-      // to rule out a chunk of nothing but nulls, which has no min or max to compare against.
-      _has_is_null_operator = true;
     }
   } else {
     // Visit the operands and ignore any output as we only want to build the column mask
@@ -110,19 +102,18 @@ std::reference_wrapper<ast::expression const> stats_columns_collector::visit(
   return expr;
 }
 
-std::pair<thrust::host_vector<bool>, bool> stats_columns_collector::get_stats_columns_mask() &&
+thrust::host_vector<bool> stats_columns_collector::get_stats_columns_mask() &&
 {
-  return {std::move(_columns_mask), _has_is_null_operator};
+  return std::move(_columns_mask);
 }
 
 stats_expression_converter::stats_expression_converter(ast::expression const& expr,
                                                        size_type num_columns,
-                                                       bool has_is_null_operator,
                                                        cuda::stream_ref stream)
   : _always_true_scalar{std::make_unique<cudf::numeric_scalar<bool>>(true, true, stream)},
     _always_true{std::make_unique<ast::literal>(*_always_true_scalar)}
 {
-  _stats_cols_per_column = has_is_null_operator ? 3 : 2;
+  _stats_cols_per_column = 3;
   _num_columns           = num_columns;
   expr.accept(*this);
 }
@@ -131,8 +122,6 @@ void stats_expression_converter::push_non_null_guard(size_type col_index,
                                                      ast::expression const& stats_expr)
 {
   using cudf::ast::ast_operator;
-
-  if (not std::cmp_equal(_stats_cols_per_column, 3)) { return; }
 
   auto const& all_null =
     _stats_expr.push(ast::column_reference{col_index * _stats_cols_per_column + 2});

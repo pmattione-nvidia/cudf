@@ -2898,11 +2898,11 @@ TEST_F(ParquetReaderTest, FilterNoStats)
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected->view(), result);
 }
 
-// Filter on a column whose row groups differ in nullability, which is what makes a statistic
-// indecisive: a chunk of nothing but nulls has no min or max at all, and a chunk holding both nulls
-// and values has a null count that says neither of those things.
 TEST_F(ParquetReaderTest, FilterNullableStats)
 {
+  // Filter on a column whose row groups differ in nullability, which is what makes a statistic
+  // indecisive: a chunk of nothing but nulls has no min or max at all, and a chunk holding both
+  // nulls and values has a null count that says neither of those things.
   auto constexpr num_input_row_groups = 3;
 
   auto const filepath = temp_env->get_temp_filepath("FilterNullableStats.parquet");
@@ -2974,31 +2974,46 @@ TEST_F(ParquetReaderTest, FilterNullableStats)
   auto const a_le_60 = cudf::ast::operation(cudf::ast::ast_operator::LESS_EQUAL, a_ref, literal_60);
   auto const b_gt_5  = cudf::ast::operation(cudf::ast::ast_operator::GREATER, b_ref, literal_5);
 
-  // Filter: IS_NULL(a). The all-null row group answers this yes and the partly null one cannot
-  // answer it at all, so both are kept and only the row group with no nulls is ruled out.
-  test_predicate_pushdown(a_is_null, 2, 4);
-
-  // Filter: a >= 10 AND a <= 20. RG 0 passes on its values, which the nulls it also holds must not
-  // count against; RG 1 holds nothing a comparison can match; RG 2's min of 100 rules it out.
   {
+    // Filter: IS_NULL(a). The all-null row group answers this yes and the partly null one cannot
+    // answer it at all, so both are kept and only the row group with no nulls is ruled out.
+    test_predicate_pushdown(a_is_null, 2, 4);
+  }
+
+  {
+    // Filter: a >= 10 AND a <= 20. RG 0 passes on its values, which the nulls it also holds must
+    // not count against; RG 1 holds nothing a comparison can match; RG 2's min of 100 rules it out.
     auto const filter =
       cudf::ast::operation(cudf::ast::ast_operator::LOGICAL_AND, a_ge_10, a_le_20);
     test_predicate_pushdown(filter, 1, 2);
   }
 
-  // Filter: a >= 50 AND a <= 60 — matches no row group. RG 0's max of 20 rules it out even though
-  // its other conjunct is indecisive there, which is the case a conjunction that is not null-aware
-  // gets wrong: it would carry the indecisive side up and keep the row group.
   {
+    // Filter: a == 50 — matches no row group. RG 0's max of 20 and RG 2's min of 100 rule those
+    // out, the guard rules out the all-null RG 1.
+    auto const filter = cudf::ast::operation(cudf::ast::ast_operator::EQUAL, a_ref, literal_50);
+    test_predicate_pushdown(filter, 0, 0);
+  }
+
+  {
+    // Filter: a != 50 — only the all-null RG 1 is ruled out, by the guard.
+    auto const filter = cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, a_ref, literal_50);
+    test_predicate_pushdown(filter, 2, 5);
+  }
+
+  {
+    // Filter: a >= 50 AND a <= 60 — matches no row group. RG 0's max of 20 rules it out even though
+    // its other conjunct is indecisive there, which is the case a conjunction that is not
+    // null-aware gets wrong: it would carry the indecisive side up and keep the row group.
     auto const filter =
       cudf::ast::operation(cudf::ast::ast_operator::LOGICAL_AND, a_ge_50, a_le_60);
     test_predicate_pushdown(filter, 0, 0);
   }
 
-  // Filter: IS_NULL(a) AND b > 5 — matches no row group, since `b` reaches only 3. The `IS_NULL`
-  // side is indecisive on RG 0 and decides nothing on its own anywhere, so this pins that one
-  // decisive conjunct is enough to prune whatever the other side says.
   {
+    // Filter: IS_NULL(a) AND b > 5 — matches no row group, since `b` reaches only 3. The `IS_NULL`
+    // side is indecisive on RG 0 and decides nothing on its own anywhere, so this pins that one
+    // decisive conjunct is enough to prune whatever the other side says.
     auto const filter =
       cudf::ast::operation(cudf::ast::ast_operator::LOGICAL_AND, a_is_null, b_gt_5);
     test_predicate_pushdown(filter, 0, 0);
