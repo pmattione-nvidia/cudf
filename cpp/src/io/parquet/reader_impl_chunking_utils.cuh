@@ -565,12 +565,14 @@ struct set_row_index {
 
   __device__ inline void operator()(size_t i)
   {
-    auto const& page          = pages[i];
-    auto const& chunk         = chunks[page.chunk_idx];
-    size_t const page_end_row = chunk.start_row + page.chunk_row + page.num_rows;
-    // this cap is necessary because in the chunked reader, we use estimations for the row
+    auto const& page            = pages[i];
+    auto const& chunk           = chunks[page.chunk_idx];
+    size_t const page_end_row   = chunk.start_row + page.chunk_row + page.num_rows;
+    size_t const chunk_last_row = chunk.start_row + chunk.num_rows;
+    // These caps are necessary because in the chunked reader, we use estimations for the row
     // counts for list columns, which can result in values > than the absolute number of rows.
-    c_info[i].end_row_index = cuda::std::min(max_row, page_end_row);
+    // Capping at the chunk's own last row keeps these indices sorted across a chunk boundary.
+    c_info[i].end_row_index = cuda::std::min(max_row, cuda::std::min(chunk_last_row, page_end_row));
   }
 };
 
@@ -605,11 +607,9 @@ struct page_total_size {
         0, cuda::proclaim_return_type<size_t>([&] __device__(size_type i) {
           return c_info[i].end_row_index;
         }));
-      // The sizes are cumulative, so this stops at the first page carrying that end row and any
-      // page after it sharing the same end row goes uncounted. `get_page_span` does read those
-      // trailing pages, so the sum can fall short by their size. That is acceptable: it is a soft
-      // budget, already deliberately over-estimated above, and such pages hold the tail of a single
-      // row.
+      // Trailing pages sharing the same end row go uncounted and the sum can fall short by their
+      // size. This is acceptable as it is a soft budget that is already deliberately
+      // over-estimated above.
       auto const page_index =
         thrust::lower_bound(thrust::seq, iter + start, iter + end, i.end_row_index) - iter;
       sum += c_info[page_index].size_bytes;

@@ -1397,19 +1397,26 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ProjectedColumnsReducePasses)
 
 TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
 {
-  // Read list and map columns holding rows long enough to span several pages, including at the end
-  // of the pass, under an input limit so that the reader selects pages by row range.
+  // Chunked read of a list and a map column whose rows vary wildly in length. Under an input limit,
+  // and with no column index in the file, the reader estimates how many rows each page holds and
+  // then picks the pages of every subpass by row range. Rows this uneven throw those estimates far
+  // off, which is what page selection mishandled for the columns in the bug report.
   auto constexpr num_rows   = 1'000;
   auto constexpr small_size = 2;
   auto constexpr giant_size = 20'000;
+  // A page holds one fragment and a row group two, so that group boundaries land on page ones.
+  auto constexpr rows_per_page  = 128;
+  auto constexpr rows_per_group = 2 * rows_per_page;
 
-  // List size of each row, shifted by one so that a scan turns them into offsets. The last row is
-  // giant so that its continuation pages sit at the end of the pass. The middle row covers the case
-  // where a later subpass exists.
+  // List size of each row, shifted by one so that a scan turns them into offsets. The giant rows
+  // end the first row group, begin and end the second, and end the file, putting the worst of the
+  // estimates on both sides of a chunk boundary and at the end of the pass.
   std::vector<cudf::size_type> offsets(num_rows + 1, small_size);
-  offsets.front()           = 0;
-  offsets[num_rows / 2 + 1] = giant_size;
-  offsets.back()            = giant_size;
+  offsets.front()             = 0;
+  offsets[rows_per_group]     = giant_size;
+  offsets[rows_per_group + 1] = giant_size;
+  offsets[2 * rows_per_group] = giant_size;
+  offsets.back()              = giant_size;
   std::inclusive_scan(offsets.begin(), offsets.end(), offsets.begin());
   auto const num_children = offsets.back();
 
@@ -1461,17 +1468,18 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
         .dictionary_policy(cudf::io::dictionary_policy::NEVER)
         .write_v2_headers(false)
         .max_page_size_bytes(4 * 1024)
-        .max_page_size_rows(128)
+        .max_page_size_rows(rows_per_page)
+        // Row groups are built out of whole fragments, which default to 5000 rows. Without this the
+        // table is one fragment and the row group size below has nothing to split on.
+        .max_page_fragment_size(rows_per_page)
         .row_group_size_rows(row_group_rows)
         .build());
     return filepath;
   };
 
-  // Several row groups as well as one, so that a column's pages span more than a single chunk. Both
-  // giant rows keep their place: the middle one in a group of its own, the last one at the very
-  // end.
-  auto constexpr rows_per_group = 256;
-  auto const filepaths          = std::vector<std::string>{
+  // Several row groups as well as one, so that a column's pages span more than a single chunk and
+  // the pages of one chunk are followed by those of the next.
+  auto const filepaths = std::vector<std::string>{
     write("spanning_snappy.parquet", cudf::io::compression_type::SNAPPY, num_rows),
     write("spanning_zstd.parquet", cudf::io::compression_type::ZSTD, num_rows),
     write("spanning_snappy_groups.parquet", cudf::io::compression_type::SNAPPY, rows_per_group),
@@ -1483,6 +1491,8 @@ TEST_F(ParquetChunkedReaderInputLimitTest, ListSpanningPagesAtPassEnd)
                                    std::size_t{1024 * 1024},
                                    std::size_t{8 * 1024 * 1024}}) {
       for (auto const output_limit : {std::size_t{0}, std::size_t{100'000}}) {
+        SCOPED_TRACE("file: " + filepath + ", input limit: " + std::to_string(input_limit) +
+                     ", output limit: " + std::to_string(output_limit));
         auto const [result, num_chunks] = chunked_read(filepath, output_limit, input_limit);
         CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected->view(), *result);
         // The small limits have to split the read, or no subpass ever selects pages by row range
