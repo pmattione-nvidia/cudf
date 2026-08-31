@@ -118,7 +118,7 @@ TEST_F(HybridScanTest, DictionaryPageFiltering)
 
   auto const dict_byte_ranges =
     cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(
-      std::get<1>(reader->secondary_filters_byte_ranges(input_row_group_indices, in_opts)));
+      reader->dictionary_pages_byte_ranges(input_row_group_indices, in_opts));
   auto [dict_page_buffers, dict_page_data, dict_page_tasks] =
     cudf::io::parquet::fetch_byte_ranges_to_device_async(datasource_ref,
                                                          dict_byte_ranges,

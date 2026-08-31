@@ -241,37 +241,50 @@ public class HybridScanReader implements AutoCloseable {
   }
 
   /**
-   * Get the byte ranges in the source file that hold the bloom filter and dictionary page
-   * data needed for the next round of row-group pruning.
+   * Get the byte ranges in the source file that hold the column-chunk bloom filter data
+   * needed for the next round of row-group pruning.
    *
-   * <p>A dictionary page range may only bound the page it points at, in which case the caller
-   * decides how much of it to read; see {@link DictionaryPageRange}.
+   * <p>The ordering follows the C++ reader's ordering and is meaningful: the i-th entry
+   * corresponds to the i-th column chunk needing a bloom filter. The result may be empty.
+   *
+   * <p>Device buffers for these ranges must be allocated using a 32-byte aligned memory
+   * resource.
    */
-  public SecondaryFilterRanges secondaryFiltersByteRanges(int[] rowGroupIndices) {
+  public ByteRange[] bloomFiltersByteRanges(int[] rowGroupIndices) {
     assertNotClosed();
     requireNonNullRowGroups(rowGroupIndices);
-    long[] packed = secondaryFiltersByteRanges(cleaner.nativeHandle, rowGroupIndices);
-    // Layout: [numBloom, numDict, bloom_o0, bloom_s0, ..., dict_o0, dict_s0, dict_extent0, ...]
-    int numBloom = (int) packed[0];
-    int numDict = (int) packed[1];
-    ByteRange[] bloom = new ByteRange[numBloom];
-    DictionaryPageRange[] dict = new DictionaryPageRange[numDict];
-    int idx = 2;
-    for (int i = 0; i < numBloom; i++) {
-      bloom[i] = new ByteRange(packed[idx], packed[idx + 1]);
-      idx += 2;
+    return decodeRanges(bloomFiltersByteRanges(cleaner.nativeHandle, rowGroupIndices));
+  }
+
+  /**
+   * Get the ranges in the source file that hold the column-chunk dictionary page data used for
+   * row-group pruning of (in)equality predicates.
+   *
+   * <p>The ordering follows the C++ reader's ordering and is meaningful: the i-th entry
+   * corresponds to the i-th column chunk needing a dictionary page. The result may be empty.
+   *
+   * <p>A range may only bound the page it points at, in which case the caller decides how much of
+   * it to read; see {@link DictionaryPageRange}.
+   */
+  public DictionaryPageRange[] dictionaryPagesByteRanges(int[] rowGroupIndices) {
+    assertNotClosed();
+    requireNonNullRowGroups(rowGroupIndices);
+    // Layout: [o0, s0, extent0, o1, s1, extent1, ...]
+    long[] packed = dictionaryPagesByteRanges(cleaner.nativeHandle, rowGroupIndices);
+    if (packed == null || packed.length == 0) {
+      return new DictionaryPageRange[0];
     }
     DictionaryPageRange.Extent[] extents = DictionaryPageRange.Extent.values();
-    for (int i = 0; i < numDict; i++) {
-      long extent = packed[idx + 2];
+    DictionaryPageRange[] out = new DictionaryPageRange[packed.length / 3];
+    for (int i = 0; i < out.length; i++) {
+      long extent = packed[3 * i + 2];
       if (extent < 0 || extent >= extents.length) {
         throw new IllegalStateException("Unknown dictionary page extent " + extent);
       }
-      dict[i] = new DictionaryPageRange(new ByteRange(packed[idx], packed[idx + 1]),
+      out[i] = new DictionaryPageRange(new ByteRange(packed[3 * i], packed[3 * i + 1]),
           extents[(int) extent]);
-      idx += 3;
     }
-    return new SecondaryFilterRanges(bloom, dict);
+    return out;
   }
 
   // TODO: add filterRowGroupsWithBloomFilters(int[] rowGroups) once the Java Parquet
@@ -766,7 +779,8 @@ public class HybridScanReader implements AutoCloseable {
 
   // Filtering
   private static native int[] filterRowGroupsWithStats(long handle, int[] rowGroupIndices);
-  private static native long[] secondaryFiltersByteRanges(long handle, int[] rowGroupIndices);
+  private static native long[] bloomFiltersByteRanges(long handle, int[] rowGroupIndices);
+  private static native long[] dictionaryPagesByteRanges(long handle, int[] rowGroupIndices);
   private static native long[] dictionaryPageLengths(long[] bufferAddresses,
                                                     long[] bufferLengths);
   private static native int[] filterRowGroupsWithDictionaryPages(long handle,

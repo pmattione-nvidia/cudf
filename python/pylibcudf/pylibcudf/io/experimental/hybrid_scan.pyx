@@ -7,7 +7,6 @@ from libc.stddef cimport size_t
 from libcpp cimport bool
 from libcpp.memory cimport make_unique, unique_ptr
 from libcpp.optional cimport optional
-from libcpp.pair cimport pair
 from libcpp.span cimport span as std_span
 from libcpp.utility cimport move
 from libcpp.vector cimport vector
@@ -116,7 +115,7 @@ def dictionary_page_byte_ranges_to_read(
     Parameters
     ----------
     dictionary_page_ranges : list[DictionaryPageRange]
-        Dictionary page ranges from :py:meth:`secondary_filters_byte_ranges`
+        Dictionary page ranges from :py:meth:`dictionary_pages_byte_ranges`
     max_upper_bound_size : int, optional
         Most bytes to read of a range that only bounds its dictionary page.
         The whole of every range is read by default.
@@ -474,12 +473,45 @@ cdef class HybridScanReader:
             ))
         return list(filtered)
 
-    def secondary_filters_byte_ranges(
+    def bloom_filters_byte_ranges(
         self,
         list row_group_indices: list[int],
         ParquetReaderOptions options
-    ) -> tuple[list[ByteRangeInfo], list[DictionaryPageRange]]:
-        """Get byte ranges of bloom filters and dictionary pages.
+    ) -> list[ByteRangeInfo]:
+        """Get byte ranges of bloom filters for row group pruning.
+
+        Notes
+        -----
+        Device buffers for bloom filter byte ranges must be allocated using a 32 byte
+        aligned memory resource.
+
+        Parameters
+        ----------
+        row_group_indices : list[int]
+            Input row group indices
+        options : ParquetReaderOptions
+            Parquet reader options
+
+        Returns
+        -------
+        list[ByteRangeInfo]
+            Byte ranges to column chunk bloom filters subject to the filter predicate
+        """
+        cdef vector[size_type] indices_vec = row_group_indices
+        cdef vector[byte_range_info] ranges
+        with nogil:
+            ranges = move(self.c_obj.get()[0].bloom_filters_byte_ranges(
+                std_span[const_size_type](indices_vec.data(), indices_vec.size()),
+                options.c_obj
+            ))
+        return [ByteRangeInfo(r.offset(), r.size()) for r in ranges]
+
+    def dictionary_pages_byte_ranges(
+        self,
+        list row_group_indices: list[int],
+        ParquetReaderOptions options
+    ) -> list[DictionaryPageRange]:
+        """Get the ranges of column chunk dictionary pages for row group pruning.
 
         A dictionary page range that only bounds its page has to be capped with
         :py:func:`dictionary_page_byte_ranges_to_read` and then cut down to its
@@ -494,28 +526,22 @@ cdef class HybridScanReader:
 
         Returns
         -------
-        tuple[list[ByteRangeInfo], list[DictionaryPageRange]]
-            Tuple of (bloom_filter_ranges, dictionary_page_ranges)
+        list[DictionaryPageRange]
+            Dictionary page ranges of column chunks subject to the filter predicate
         """
         cdef vector[size_type] indices_vec = row_group_indices
-        cdef pair[vector[byte_range_info], vector[cpp_dictionary_page_range]] ranges
-        cdef cpp_hybrid_scan_reader* reader_ptr = self.c_obj.get()
+        cdef vector[cpp_dictionary_page_range] ranges
         with nogil:
-            ranges = move(reader_ptr.secondary_filters_byte_ranges(
+            ranges = move(self.c_obj.get()[0].dictionary_pages_byte_ranges(
                 std_span[const_size_type](indices_vec.data(), indices_vec.size()),
                 options.c_obj
             ))
-
-        bloom_ranges = [
-            ByteRangeInfo(r.offset(), r.size()) for r in ranges.first
-        ]
-        dict_ranges = [
+        return [
             DictionaryPageRange(
                 ByteRangeInfo(r.byte_range.offset(), r.byte_range.size()), r.extent
             )
-            for r in ranges.second
+            for r in ranges
         ]
-        return (bloom_ranges, dict_ranges)
 
     def filter_row_groups_with_dictionary_pages(
         self,

@@ -187,7 +187,7 @@ JNIEXPORT jintArray JNICALL Java_ai_rapids_cudf_HybridScanReader_filterRowGroups
   JNI_CATCH(env, nullptr);
 }
 
-JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_HybridScanReader_secondaryFiltersByteRanges(
+JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_HybridScanReader_bloomFiltersByteRanges(
   JNIEnv* env, jclass, jlong handle, jintArray j_row_groups)
 {
   JNI_NULL_CHECK(env, handle, "handle is null", nullptr);
@@ -197,21 +197,30 @@ JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_HybridScanReader_secondaryFilte
     cudf::jni::auto_set_device(env);
     auto* wrapper = reinterpret_cast<hybrid_scan_reader_wrapper*>(handle);
     auto holder   = make_row_group_span(env, j_row_groups);
-    auto [bloom, dict] =
-      wrapper->reader->secondary_filters_byte_ranges(holder.span(), wrapper->options);
-    // Pack as [numBloom, numDict, bloom_o0, bloom_s0, ..., dict_o0, dict_s0, dict_extent0, ...]
-    auto const total_len = 2 + (bloom.size() * 2) + (dict.size() * 3);
+    auto ranges   = wrapper->reader->bloom_filters_byte_ranges(holder.span(), wrapper->options);
+    return ranges_to_jlong_array(env, ranges);
+  }
+  JNI_CATCH(env, nullptr);
+}
+
+JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_HybridScanReader_dictionaryPagesByteRanges(
+  JNIEnv* env, jclass, jlong handle, jintArray j_row_groups)
+{
+  JNI_NULL_CHECK(env, handle, "handle is null", nullptr);
+  JNI_NULL_CHECK(env, j_row_groups, "row groups is null", nullptr);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto* wrapper = reinterpret_cast<hybrid_scan_reader_wrapper*>(handle);
+    auto holder   = make_row_group_span(env, j_row_groups);
+    auto ranges   = wrapper->reader->dictionary_pages_byte_ranges(holder.span(), wrapper->options);
+    // Pack as [o0, s0, extent0, o1, s1, extent1, ...]
+    auto const total_len = ranges.size() * 3;
     auto result          = env->NewLongArray(total_len);
     if (result == nullptr) { return nullptr; }
     std::vector<jlong> data;
     data.reserve(total_len);
-    data.push_back(static_cast<jlong>(bloom.size()));
-    data.push_back(static_cast<jlong>(dict.size()));
-    for (auto const& r : bloom) {
-      data.push_back(static_cast<jlong>(r.offset()));
-      data.push_back(static_cast<jlong>(r.size()));
-    }
-    for (auto const& r : dict) {
+    for (auto const& r : ranges) {
       data.push_back(static_cast<jlong>(r.byte_range.offset()));
       data.push_back(static_cast<jlong>(r.byte_range.size()));
       // The extent is packed as its enumerator value, which DictionaryPageRange.Extent mirrors
