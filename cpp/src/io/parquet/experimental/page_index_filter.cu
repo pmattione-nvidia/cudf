@@ -341,6 +341,18 @@ struct page_stats_caster : public stats_caster_base {
           auto const num_pages_in_colchunk   = column_index.min_values.size();
           auto const page_offset_in_colchunk = col_chunk_page_offsets[page_offset_idx++];
 
+          if (has_is_null_operator) {
+            CUDF_EXPECTS(column_index.null_pages.size() == num_pages_in_colchunk,
+                         "Number of null page flags must match the number of pages in the column "
+                         "chunk",
+                         std::invalid_argument);
+            CUDF_EXPECTS(not column_index.null_counts.has_value() or
+                           column_index.null_counts.value().size() == num_pages_in_colchunk,
+                         "Number of page null counts must match the number of pages in the column "
+                         "chunk",
+                         std::invalid_argument);
+          }
+
           // For all pages in this column chunk
           std::for_each(
             cuda::counting_iterator<std::size_t>{0},
