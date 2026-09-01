@@ -289,16 +289,30 @@ class hybrid_scan_metadata {
  *   auto const dict_page_byte_ranges =
  *     dictionary_page_byte_ranges_to_read(dict_page_ranges, max_dict_page_size);
  *
- *   // Fetch dictionary page byte ranges into device buffers and create spans
- *   auto [dict_page_buffers, dict_page_data, dict_page_tasks] =
- *     parquet::fetch_byte_ranges_to_device_async(datasource, dict_page_byte_ranges, stream, mr);
- *   dict_page_tasks.get();
- *
- *   // The spans above are what the reader takes as long as every range was exactly a page. What
- *   // was read of a range that only bounds its page runs past that page instead, and may hold no
- *   // page at all, so such a range has to be fetched into host memory, measured with
- *   // `dictionary_page_length`, and copied to the device cut down to its page. A column chunk
- *   // left with an empty span is not pruned with.
+ *   // Hand the reader exactly one dictionary page per chunk. An `exact` range is already one page,
+ *   // but an `upper_bound_if_present` range runs past its page and may hold none at all, so it is
+ *   // read on the host, measured with `dictionary_page_length`, and copied to the device trimmed
+ *   // to that page, or left as an empty span when the chunk has no dictionary page. Passing the
+ *   // untrimmed range would let the reader read the following data-page bytes as dictionary data.
+ *   // The reader matches spans to ranges by position, so an empty span is kept in place.
+ *   auto dict_page_buffers = std::vector<rmm::device_buffer>{};
+ *   auto dict_page_data    = std::vector<device_span<uint8_t const>>{};
+ *   auto host_reads        = std::vector<std::unique_ptr<datasource::buffer>>{};
+ *   for (auto i = 0uz; i < dict_page_byte_ranges.size(); ++i) {
+ *     auto const& read_range = dict_page_byte_ranges[i];
+ *     auto host_bytes        = datasource.host_read(read_range.offset(), read_range.size());
+ *     auto const bytes = host_span<uint8_t const>{host_bytes->data(), host_bytes->size()};
+ *     auto const page_size =
+ *       (dict_page_ranges[i].extent == dictionary_page_extent::upper_bound_if_present)
+ *         ? dictionary_page_length(bytes).value_or(0)
+ *         : static_cast<int64_t>(bytes.size());
+ *     // Copy the first `page_size` bytes to the device (an empty buffer when there is no page)
+ *     dict_page_buffers.emplace_back(bytes.data(), page_size, stream, mr);
+ *     dict_page_data.emplace_back(
+ *       static_cast<uint8_t const*>(dict_page_buffers.back().data()), page_size);
+ *     host_reads.emplace_back(std::move(host_bytes));  // keep alive until the copies complete
+ *   }
+ *   stream.synchronize();
  *
  *   // Prune row groups using dictionaries
  *   dict_filtered_row_group_indices = reader->filter_row_groups_with_dictionary_pages(

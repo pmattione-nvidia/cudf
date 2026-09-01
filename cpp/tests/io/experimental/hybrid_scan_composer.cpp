@@ -87,13 +87,11 @@ auto apply_hybrid_scan_filters(cudf::io::datasource& datasource,
   std::vector<cudf::size_type> dictionary_page_filtered_row_group_indices;
   dictionary_page_filtered_row_group_indices.reserve(current_row_group_indices.size());
   if (dict_page_ranges.size()) {
-    // Fetch dictionary page buffers from the input file buffer
-    auto const dict_page_byte_ranges =
-      cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(dict_page_ranges);
-    auto [dict_page_buffers, dict_page_data, dict_read_tasks] =
-      cudf::io::parquet::fetch_byte_ranges_to_device_async(
-        datasource, dict_page_byte_ranges, stream, mr);
-    dict_read_tasks.get();
+    // Fetch dictionary pages, trimming any upper-bound range to exactly one dictionary page (or an
+    // empty span when the chunk has none) so the reader never reads data-page bytes as dictionary
+    // data.
+    auto [dict_page_buffers, dict_page_data] =
+      fetch_trimmed_dictionary_pages(datasource, dict_page_ranges, stream, mr);
 
     // Filter row groups with dictionary pages
     dictionary_page_filtered_row_group_indices = reader.filter_row_groups_with_dictionary_pages(

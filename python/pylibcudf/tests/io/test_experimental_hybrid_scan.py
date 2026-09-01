@@ -23,6 +23,7 @@ from pylibcudf.io.experimental import (
     HybridScanReader,
     UseDataPageMask,
     dictionary_page_byte_ranges_to_read,
+    dictionary_page_length,
 )
 
 
@@ -883,15 +884,35 @@ def test_hybrid_scan_filter_row_groups_with_dictionary_pages_negation(
         dictionary_ranges = reader.dictionary_pages_byte_ranges(
             all_row_groups, simple_parquet_options
         )
+        # Cap a range that only bounds its page: a kept dictionary is at most
+        # the writer's default (1 MiB), plus slack for the page header and
+        # compression framing.
+        example_max_dictionary_page_read_bound = 1024 * 1024 + 64 * 1024
+        to_read = dictionary_page_byte_ranges_to_read(
+            dictionary_ranges, example_max_dictionary_page_read_bound
+        )
+        # Hand the reader exactly one dictionary page per chunk. An upper-bound
+        # range runs past its page and may hold none at all, so it is measured
+        # with dictionary_page_length and trimmed to that page, or left empty
+        # when the chunk has no dictionary page. The reader matches spans to
+        # ranges by position, so an empty span is kept in place.
+        dict_page_bytes = []
+        for page_range, byte_range in zip(
+            dictionary_ranges, to_read, strict=True
+        ):
+            read = simple_parquet_bytes[
+                byte_range.offset : byte_range.offset + byte_range.size
+            ]
+            if (
+                page_range.extent
+                == DictionaryPageExtent.upper_bound_if_present
+            ):
+                length = dictionary_page_length(read) if read else None
+                read = read[:length] if length is not None else b""
+            dict_page_bytes.append(read)
         # the caller is responsible for keeping the source bytes alive until
         # synchronize_stream() below runs.
         # See https://github.com/rapidsai/rmm/issues/2521
-        dict_page_bytes = [
-            simple_parquet_bytes[
-                r.byte_range.offset : r.byte_range.offset + r.byte_range.size
-            ]
-            for r in dictionary_ranges
-        ]
         dictionary_data = [
             plc.gpumemoryview(
                 rmm.DeviceBuffer.to_device(b, plc.utils._get_stream())
