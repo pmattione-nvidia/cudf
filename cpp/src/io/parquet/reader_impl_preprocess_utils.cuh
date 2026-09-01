@@ -287,8 +287,9 @@ struct set_final_row_count {
     auto const rows_left = static_cast<int32_t>(
       (chunk_last_row > page_start_row) ? (chunk_last_row - page_start_row) : 0);
     // Mark `is_num_rows_adjusted` to signal string decoders that the `num_rows` of this page has
-    // been adjusted.
-    page.is_num_rows_adjusted = page.num_rows != rows_left;
+    // been adjusted. Adjusting an already adjusted count to the same value does not undo it, so
+    // this never clears: a later call sees the count it forced earlier and would compare equal.
+    page.is_num_rows_adjusted = page.is_num_rows_adjusted or (page.num_rows != rows_left);
     page.num_rows             = rows_left;
   }
 };
