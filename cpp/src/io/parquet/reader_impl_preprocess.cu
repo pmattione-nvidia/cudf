@@ -891,8 +891,11 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
   // rows as the smallest batch (by column) we have decompressed.
   size_t first_page_index = 0;
   size_t max_row          = std::numeric_limits<size_t>::max();
-  auto const last_pass_row =
-    _file_itm_data.input_pass_start_row_count[_file_itm_data._current_input_pass + 1];
+  auto const pass_end     = pass.skip_rows + pass.num_rows;
+  // The row groups of this pass can hold more rows than the pass reads, in which case a page whose
+  // rows were capped at the end of the pass still is the last page of it.
+  auto const last_pass_row = std::min<size_t>(
+    _file_itm_data.input_pass_start_row_count[_file_itm_data._current_input_pass + 1], pass_end);
   // for each column
   for (size_t idx = 0; idx < subpass.column_page_count.size(); idx++) {
     // compute max row for this column in the subpass
@@ -926,9 +929,8 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
 
     first_page_index += subpass.column_page_count[idx];
   }
-  subpass.skip_rows   = pass.skip_rows + pass.processed_rows;
-  auto const pass_end = pass.skip_rows + pass.num_rows;
-  max_row             = std::min<size_t>(max_row, pass_end);
+  subpass.skip_rows = pass.skip_rows + pass.processed_rows;
+  max_row           = std::min<size_t>(max_row, pass_end);
   CUDF_EXPECTS(max_row > subpass.skip_rows, "Unexpected short subpass", std::underflow_error);
   // Limit the number of rows to read in this subpass to the cudf's column size limit - 1 (for
   // lists). Only apply this limit when chunking is enabled.
