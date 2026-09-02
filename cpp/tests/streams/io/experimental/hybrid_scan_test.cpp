@@ -125,13 +125,8 @@ TEST_F(HybridScanTest, DictionaryPageFiltering)
 
   auto const dict_page_ranges =
     reader->dictionary_pages_byte_ranges(input_row_group_indices, in_opts);
-  // Cap a range that only bounds its page: a kept dictionary is at most
-  // `default_max_dictionary_size`, plus slack for the page header and compression framing.
-  constexpr int64_t example_max_dictionary_page_read_bound =
-    static_cast<int64_t>(cudf::io::default_max_dictionary_size) + (64 * 1024);
   auto const dict_byte_ranges =
-    cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(
-      dict_page_ranges, example_max_dictionary_page_read_bound);
+    cudf::io::parquet::experimental::dictionary_page_byte_ranges_to_read(dict_page_ranges);
 
   // Trim each range to exactly one dictionary page (or an empty span when the chunk has none), so
   // the reader never reads following data-page bytes as dictionary data.

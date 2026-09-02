@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from cython.operator cimport dereference
-from libc.stdint cimport INT64_MAX, int64_t, uint8_t, uintptr_t
+from libc.stdint cimport int64_t, uint8_t, uintptr_t
 from libc.stddef cimport size_t
 from libcpp cimport bool
 from libcpp.memory cimport make_unique, unique_ptr
@@ -26,6 +26,7 @@ from pylibcudf.libcudf.io.hybrid_scan cimport (
     const_dictionary_page_range,
     const_size_type,
     const_uint8_t,
+    default_max_dictionary_page_read_size as cpp_default_max_dictionary_page_read_size,
     dictionary_page_byte_ranges_to_read as cpp_dictionary_page_byte_ranges_to_read,
     dictionary_page_extent as cpp_dictionary_page_extent,
     dictionary_page_length as cpp_dictionary_page_length,
@@ -55,7 +56,10 @@ import pylibcudf.libcudf.io.hybrid_scan
 UseDataPageMask = pylibcudf.libcudf.io.hybrid_scan.use_data_page_mask
 DictionaryPageExtent = pylibcudf.libcudf.io.hybrid_scan.dictionary_page_extent
 
+DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE = cpp_default_max_dictionary_page_read_size
+
 __all__ = [
+    "DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE",
     "DictionaryPageExtent",
     "DictionaryPageRange",
     "FileMetaData",
@@ -117,8 +121,9 @@ def dictionary_page_byte_ranges_to_read(
     dictionary_page_ranges : list[DictionaryPageRange]
         Dictionary page ranges from :py:meth:`dictionary_pages_byte_ranges`
     max_upper_bound_size : int, optional
-        Most bytes to read of a range that only bounds its dictionary page.
-        The whole of every range is read by default.
+        Most bytes to read of a range that only bounds its dictionary page. A
+        column chunk whose dictionary page is longer than this is not pruned.
+        Defaults to ``DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE``.
 
     Returns
     -------
@@ -136,7 +141,9 @@ def dictionary_page_byte_ranges_to_read(
         c_ranges.push_back(c_range)
 
     cdef int64_t c_max_upper_bound_size = (
-        INT64_MAX if max_upper_bound_size is None else max_upper_bound_size
+        cpp_default_max_dictionary_page_read_size
+        if max_upper_bound_size is None
+        else max_upper_bound_size
     )
     cdef vector[byte_range_info] ranges = cpp_dictionary_page_byte_ranges_to_read(
         host_span[const_dictionary_page_range](

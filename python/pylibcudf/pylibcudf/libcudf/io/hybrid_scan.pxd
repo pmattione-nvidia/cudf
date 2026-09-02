@@ -212,6 +212,8 @@ ctypedef const dictionary_page_range const_dictionary_page_range
 cdef extern from "cudf/io/experimental/hybrid_scan.hpp" \
         namespace "cudf::io::parquet::experimental" nogil:
 
+    const int64_t default_max_dictionary_page_read_size
+
     vector[byte_range_info] dictionary_page_byte_ranges_to_read(
         host_span[const_dictionary_page_range] dictionary_page_ranges,
         int64_t max_upper_bound_size

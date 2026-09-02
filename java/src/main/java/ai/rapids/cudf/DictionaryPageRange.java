@@ -29,6 +29,17 @@ public final class DictionaryPageRange {
     UPPER_BOUND_IF_PRESENT
   }
 
+  /**
+   * Default cap on the bytes read of a range that only bounds its dictionary page.
+   *
+   * <p>One mebibyte is what writers commonly cap a dictionary at, and the slack on top of that
+   * covers the page header and compression framing. A column chunk whose dictionary page does
+   * not fit is not pruned.
+   *
+   * <p>Matches {@code cudf::io::parquet::experimental::default_max_dictionary_page_read_size}.
+   */
+  public static final long DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE = (1024 * 1024) + (64 * 1024);
+
   private final ByteRange byteRange;
   private final Extent extent;
 
@@ -58,7 +69,8 @@ public final class DictionaryPageRange {
    * it is handed to the reader, which wants a buffer holding exactly one page; see
    * {@link HybridScanReader#dictionaryPageLengths}.
    *
-   * @param maxUpperBoundSize most bytes to read of a range that only bounds its dictionary page
+   * @param maxUpperBoundSize most bytes to read of a range that only bounds its dictionary page. A
+   *                          column chunk whose dictionary page is longer than this is not pruned.
    * @return the byte range to read
    */
   public ByteRange byteRangeToRead(long maxUpperBoundSize) {
@@ -69,6 +81,15 @@ public final class DictionaryPageRange {
       return byteRange;
     }
     return new ByteRange(byteRange.offset(), Math.min(byteRange.size(), maxUpperBoundSize));
+  }
+
+  /**
+   * The byte range to read, capped at {@link #DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE}.
+   *
+   * @return the byte range to read
+   */
+  public ByteRange byteRangeToRead() {
+    return byteRangeToRead(DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE);
   }
 
   @Override

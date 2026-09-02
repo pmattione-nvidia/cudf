@@ -19,6 +19,8 @@ try:
 except ImportError:
     from typing_extensions import Buffer
 
+DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE: int
+
 class UseDataPageMask(IntEnum):
     YES = 1
     NO = 0

@@ -181,15 +181,6 @@ template <typename T,
   rmm::device_async_resource_ref mr);
 
 /**
- * @brief Default cap on the bytes read of a range that only bounds its dictionary page
- *
- * A dictionary the writer keeps is at most `cudf::io::default_max_dictionary_size`; the extra slack
- * covers the page header and compression framing so a whole dictionary page still fits the read.
- */
-constexpr int64_t example_max_dictionary_page_read_bound =
-  static_cast<int64_t>(cudf::io::default_max_dictionary_size) + (64 * 1024);
-
-/**
  * @brief Fetch dictionary pages, trimming every upper-bound range to exactly one dictionary page
  *
  * Reads each range on the host (capping a range that only bounds its page at `max_upper_bound_size`
@@ -207,7 +198,8 @@ fetch_trimmed_dictionary_pages(
   cudf::host_span<cudf::io::parquet::experimental::dictionary_page_range const> dict_page_ranges,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
-  int64_t max_upper_bound_size = example_max_dictionary_page_read_bound);
+  int64_t max_upper_bound_size =
+    cudf::io::parquet::experimental::default_max_dictionary_page_read_size);
 
 /**
  * @brief Multi-file overload of `fetch_trimmed_dictionary_pages`
@@ -225,4 +217,5 @@ fetch_trimmed_dictionary_pages(
   cudf::host_span<cudf::size_type const> source_map,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
-  int64_t max_upper_bound_size = example_max_dictionary_page_read_bound);
+  int64_t max_upper_bound_size =
+    cudf::io::parquet::experimental::default_max_dictionary_page_read_size);

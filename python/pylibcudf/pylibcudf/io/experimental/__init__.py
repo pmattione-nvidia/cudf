@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pylibcudf.io.experimental.hybrid_scan import (
+    DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE,
     DictionaryPageExtent,
     DictionaryPageRange,
     HybridScanMetadata,
@@ -13,6 +14,7 @@ from pylibcudf.io.experimental.hybrid_scan import (
 from pylibcudf.io.parquet_metadata import FileMetaData
 
 __all__ = [
+    "DEFAULT_MAX_DICTIONARY_PAGE_READ_SIZE",
     "DictionaryPageExtent",
     "DictionaryPageRange",
     "FileMetaData",  # backwards compatibility

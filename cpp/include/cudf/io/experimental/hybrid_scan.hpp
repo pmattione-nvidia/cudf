@@ -16,7 +16,6 @@
 
 #include <cuda/stream>
 
-#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -88,20 +87,30 @@ struct dictionary_page_range {
 };
 
 /**
+ * @brief Default cap on the bytes read of a range that only bounds its dictionary page
+ *
+ * One mebibyte is what writers commonly cap a dictionary at, and the slack on top of that
+ * covers the page header and compression framing. A column chunk whose dictionary page does
+ * not fit is not pruned.
+ */
+constexpr int64_t default_max_dictionary_page_read_size = (1024 * 1024) + (64 * 1024);
+
+/**
  * @brief Byte ranges to read for the specified dictionary page ranges
  *
  * No more than `max_upper_bound_size` bytes are read of a range that only bounds its dictionary
- * page, which is how a caller caps what it spends looking for a page that may not be there. By
- * default the whole of every range is read. What is read of such a range still has to be trimmed to
- * the dictionary page before it is handed to the reader, see `dictionary_page_range`.
+ * page, which is how a caller caps what it spends looking for a page that may not be there. What is
+ * read of such a range still has to be trimmed to the dictionary page before it is handed to the
+ * reader, see `dictionary_page_range`.
  *
  * @param dictionary_page_ranges Dictionary page ranges from `dictionary_pages_byte_ranges`
- * @param max_upper_bound_size Most bytes to read of a range that only bounds its dictionary page
+ * @param max_upper_bound_size Most bytes to read of a range that only bounds its dictionary page. A
+ *        column chunk whose dictionary page is longer than this is not pruned.
  * @return Byte ranges to read, one per input dictionary page range
  */
 [[nodiscard]] std::vector<byte_range_info> dictionary_page_byte_ranges_to_read(
   cudf::host_span<dictionary_page_range const> dictionary_page_ranges,
-  int64_t max_upper_bound_size = std::numeric_limits<int64_t>::max());
+  int64_t max_upper_bound_size = default_max_dictionary_page_read_size);
 
 /**
  * @brief Length of the dictionary page at the front of the specified bytes, header included
@@ -286,8 +295,7 @@ class hybrid_scan_metadata {
  * if (dict_page_ranges.size()) {
  *   // Decide how much of each range to read. A range that only bounds its dictionary page can be
  *   // much larger than the page it bounds, so read no more of it than a dictionary page is worth.
- *   auto const dict_page_byte_ranges =
- *     dictionary_page_byte_ranges_to_read(dict_page_ranges, max_dict_page_size);
+ *   auto const dict_page_byte_ranges = dictionary_page_byte_ranges_to_read(dict_page_ranges);
  *
  *   // Hand the reader exactly one dictionary page per chunk. An `exact` range is already one page,
  *   // but an `upper_bound_if_present` range runs past its page and may hold none at all, so it is

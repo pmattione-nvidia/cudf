@@ -884,13 +884,7 @@ def test_hybrid_scan_filter_row_groups_with_dictionary_pages_negation(
         dictionary_ranges = reader.dictionary_pages_byte_ranges(
             all_row_groups, simple_parquet_options
         )
-        # Cap a range that only bounds its page: a kept dictionary is at most
-        # the writer's default (1 MiB), plus slack for the page header and
-        # compression framing.
-        example_max_dictionary_page_read_bound = 1024 * 1024 + 64 * 1024
-        to_read = dictionary_page_byte_ranges_to_read(
-            dictionary_ranges, example_max_dictionary_page_read_bound
-        )
+        to_read = dictionary_page_byte_ranges_to_read(dictionary_ranges)
         # Hand the reader exactly one dictionary page per chunk. An upper-bound
         # range runs past its page and may hold none at all, so it is measured
         # with dictionary_page_length and trimmed to that page, or left empty
