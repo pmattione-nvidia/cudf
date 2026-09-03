@@ -202,6 +202,7 @@ multisource_device_data fetch_multisource_device_data(
   auto [buffers, per_source_spans, tasks] = cudf::io::parquet::fetch_byte_ranges_to_device_async(
     inputs.datasource_refs,
     cudf::host_span<std::vector<cudf::io::text::byte_range_info> const>{byte_ranges_per_source},
+    cudf::io::parquet::io_submission_policy::SERIALIZE,
     stream,
     mr);
   tasks.get();
