@@ -18,9 +18,6 @@ libcudf
 .. doxygennamespace:: cudf::io::parquet
    :desc-only:
 
-.. doxygennamespace:: cudf::io::parquet::experimental
-   :desc-only:
-
 .. doxygennamespace:: cudf::io::experimental
    :desc-only:
 

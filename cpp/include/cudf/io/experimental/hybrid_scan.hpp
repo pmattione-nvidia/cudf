@@ -109,7 +109,8 @@ constexpr int64_t default_max_dictionary_page_read_size = (1024 * 1024) + (64 * 
  * @return Byte ranges to read, one per input dictionary page range
  */
 [[nodiscard]] std::vector<byte_range_info> dictionary_page_byte_ranges_to_read(
-  cudf::host_span<dictionary_page_range const> dictionary_page_ranges,
+  cudf::host_span<cudf::io::parquet::experimental::dictionary_page_range const>
+    dictionary_page_ranges,
   int64_t max_upper_bound_size = default_max_dictionary_page_read_size);
 
 /**
