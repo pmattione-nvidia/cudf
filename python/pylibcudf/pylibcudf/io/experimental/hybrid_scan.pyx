@@ -119,7 +119,8 @@ def dictionary_page_byte_ranges_to_read(
     Parameters
     ----------
     dictionary_page_ranges : list[DictionaryPageRange]
-        Dictionary page ranges from :py:meth:`dictionary_pages_byte_ranges`
+        Dictionary page ranges from
+        :py:meth:`HybridScanReader.dictionary_pages_byte_ranges`
     max_upper_bound_size : int, optional
         Most bytes to read of a range that only bounds its dictionary page. A
         column chunk whose dictionary page is longer than this is not pruned.
