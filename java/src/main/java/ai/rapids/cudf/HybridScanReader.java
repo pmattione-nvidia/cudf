@@ -80,11 +80,7 @@ public class HybridScanReader implements AutoCloseable {
     /** @return the materialized filter column table. */
     public Table table() { return table; }
 
-    /**
-     * @return the names of the columns of {@link #table()}, in the same order. The filter
-     *         columns are in no particular order, and include any the filter reads that are
-     *         not in the column selection.
-     */
+    /** @return the names of the columns of {@link #table()}, in the same order. */
     public String[] columnNames() { return columnNames; }
 
     /** @return the (mutated) row mask after the filter expression was applied. */
