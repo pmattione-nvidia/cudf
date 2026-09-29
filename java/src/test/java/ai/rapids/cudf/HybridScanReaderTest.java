@@ -557,6 +557,7 @@ public class HybridScanReaderTest extends CudfTestBase {
                reader.materializeFilterColumns(survived, filterCols, false)) {
         assertEquals(1599L, fr.table().getRowCount());
         assertEquals(1, fr.table().getNumberOfColumns(), "filter table contains only zip_code");
+        assertArrayEquals(new String[]{"zip_code"}, fr.columnNames());
       } finally {
         closeAll(filterCols);
       }
@@ -587,6 +588,35 @@ public class HybridScanReaderTest extends CudfTestBase {
                fr.rowMask(), false)) {
         assertEquals(1599L, payload.getRowCount());
         assertEquals(2, payload.getNumberOfColumns(), "payload table contains id + num_units");
+      } finally {
+        closeAll(filterCols);
+        closeAll(payloadCols);
+      }
+    }
+  }
+
+  /**
+   * Verifies materializePayloadColumnsWithMeta() names the payload columns, in the order of
+   * the table it returns.
+   */
+  @Test
+  void testMaterializePayloadColumnsWithMetaNames(@TempDir Path tmp) throws IOException {
+    try (OpenReader open = OpenReader.standard(tmp).withFilter("zip_code", BinaryOperator.GREATER, 150000)) {
+      HybridScanReader reader = open.reader;
+      int[] survived = reader.filterRowGroupsWithStats(reader.allRowGroups());
+      DeviceMemoryBuffer[] filterCols = copyRangesToDevice(
+          open.file, reader.filterColumnChunksByteRanges(survived));
+      DeviceMemoryBuffer[] payloadCols = copyRangesToDevice(
+          open.file, reader.payloadColumnChunksByteRanges(survived));
+      try (HybridScanReader.FilterMaterializationResult fr =
+               reader.materializeFilterColumns(survived, filterCols, false);
+           TableWithMeta payload = reader.materializePayloadColumnsWithMeta(survived,
+               payloadCols, fr.rowMask(), false)) {
+        assertArrayEquals(new String[]{"id", "num_units"}, payload.getColumnNames());
+        try (Table table = payload.releaseTable()) {
+          assertEquals(1599L, table.getRowCount());
+          assertEquals(2, table.getNumberOfColumns());
+        }
       } finally {
         closeAll(filterCols);
         closeAll(payloadCols);

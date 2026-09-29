@@ -9,8 +9,6 @@ import ai.rapids.cudf.ast.CompiledExpression;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Arrays;
-
 /**
  * Experimental Parquet hybrid-scan reader.
  *
@@ -69,16 +67,25 @@ public class HybridScanReader implements AutoCloseable {
    */
   public static final class FilterMaterializationResult implements AutoCloseable {
     private final Table table;
+    private final String[] columnNames;
     private final ColumnVector rowMask;
     private boolean closed = false;
 
-    FilterMaterializationResult(Table table, ColumnVector rowMask) {
+    FilterMaterializationResult(Table table, String[] columnNames, ColumnVector rowMask) {
       this.table = table;
+      this.columnNames = columnNames;
       this.rowMask = rowMask;
     }
 
     /** @return the materialized filter column table. */
     public Table table() { return table; }
+
+    /**
+     * @return the names of the columns of {@link #table()}, in the same order. The filter
+     *         columns are in no particular order, and include any the filter reads that are
+     *         not in the column selection.
+     */
+    public String[] columnNames() { return columnNames; }
 
     /** @return the (mutated) row mask after the filter expression was applied. */
     public ColumnVector rowMask() { return rowMask; }
@@ -368,10 +375,10 @@ public class HybridScanReader implements AutoCloseable {
     long[] handles = materializeFilterColumns(cleaner.nativeHandle, rowGroupIndices,
         addrs, lens, usePageLevelPruning);
     ColumnVector rowMask = new ColumnVector(handles[0]);
-    try {
-      long[] tableHandles = Arrays.copyOfRange(handles, 1, handles.length);
-      Table table = new Table(tableHandles);
-      return new FilterMaterializationResult(table, rowMask);
+    try (TableWithMeta tableWithMeta = new TableWithMeta(handles[1])) {
+      String[] columnNames = tableWithMeta.getColumnNames();
+      Table table = tableWithMeta.releaseTable();
+      return new FilterMaterializationResult(table, columnNames, rowMask);
     } catch (Throwable t) {
       rowMask.close();
       throw t;
@@ -397,14 +404,29 @@ public class HybridScanReader implements AutoCloseable {
                                          DeviceMemoryBuffer[] columnChunkData,
                                          ColumnVector rowMask,
                                          boolean usePageLevelPruning) {
+    try (TableWithMeta tableWithMeta = materializePayloadColumnsWithMeta(rowGroupIndices,
+        columnChunkData, rowMask, usePageLevelPruning)) {
+      return tableWithMeta.releaseTable();
+    }
+  }
+
+  /**
+   * Same as {@link #materializePayloadColumns(int[], DeviceMemoryBuffer[], ColumnVector,
+   * boolean)}, but also returns the names of the payload columns.
+   *
+   * @return the materialized payload column table with its column names; caller must close
+   */
+  public TableWithMeta materializePayloadColumnsWithMeta(int[] rowGroupIndices,
+                                                         DeviceMemoryBuffer[] columnChunkData,
+                                                         ColumnVector rowMask,
+                                                         boolean usePageLevelPruning) {
     assertNotClosed();
     requireNonNullRowGroups(rowGroupIndices);
     requireNonNullRowMask(rowMask);
     long[] addrs = bufferAddrs(columnChunkData);
     long[] lens = bufferLens(columnChunkData);
-    long[] handles = materializePayloadColumns(cleaner.nativeHandle, rowGroupIndices,
-        addrs, lens, rowMask.getNativeView(), usePageLevelPruning);
-    return new Table(handles);
+    return new TableWithMeta(materializePayloadColumns(cleaner.nativeHandle, rowGroupIndices,
+        addrs, lens, rowMask.getNativeView(), usePageLevelPruning));
   }
 
   // ----------------------------------------------------------------------
@@ -741,18 +763,19 @@ public class HybridScanReader implements AutoCloseable {
   private static native long[] allColumnChunksByteRanges(long handle, int[] rowGroupIndices);
 
   // Two-step materialize (filter + payload)
-  // Returns: [row_mask_col_handle, table_col0_handle, ..., table_colN_handle]
+  // Returns: [row_mask_col_handle, table_with_metadata_handle]
   private static native long[] materializeFilterColumns(long handle,
                                                         int[] rowGroupIndices,
                                                         long[] bufferAddresses,
                                                         long[] bufferLengths,
                                                         boolean usePageLevelPruning);
-  private static native long[] materializePayloadColumns(long handle,
-                                                         int[] rowGroupIndices,
-                                                         long[] bufferAddresses,
-                                                         long[] bufferLengths,
-                                                         long rowMaskViewHandle,
-                                                         boolean usePageLevelPruning);
+  // Returns: table_with_metadata_handle
+  private static native long materializePayloadColumns(long handle,
+                                                       int[] rowGroupIndices,
+                                                       long[] bufferAddresses,
+                                                       long[] bufferLengths,
+                                                       long rowMaskViewHandle,
+                                                       boolean usePageLevelPruning);
 
   // One-shot materialize (all columns)
   private static native long[] materializeAllColumns(long handle,
